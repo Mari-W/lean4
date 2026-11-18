@@ -117,8 +117,10 @@ rewrite_rule read_rewrite_rule(environment const & env, name const & thm) {
 
 rewrite_rule_table::rewrite_rule_table(environment const & env, array_ref<name> const & rules) {
     /* Declarations mostly share one rule set object, so a few entries per thread suffice. Each entry
-       keeps its set alive, so its address cannot be reused by another set. */
-    static thread_local std::vector<std::pair<array_ref<name>, std::shared_ptr<table const>>> cache;
+       keeps its set alive, so its address cannot be reused by another set. The cache is never freed:
+       a destructor at thread exit would release Lean objects after the runtime has shut down. */
+    static thread_local auto * cache_ptr = new std::vector<std::pair<array_ref<name>, std::shared_ptr<table const>>>();
+    auto & cache = *cache_ptr;
     for (auto const & entry : cache) {
         if (entry.first.raw() == rules.raw()) {
             m_table = entry.second;

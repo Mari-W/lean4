@@ -1412,14 +1412,6 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
     r = lazy_delta_reduction(t_n, s_n, t_origin, s_origin);
     if (r != l_undef) return r == l_true;
 
-    /* Both sides are stuck. A side whose unfolding started at a head with rules gets them now. */
-    if (t_origin || s_origin) {
-        rewrite_fuel_scope fuel(*this);
-        optional<expr> t_r = t_origin && is_stuck_result(t_n) ? reduce_rewrite(*t_origin, true) : none_expr();
-        optional<expr> s_r = s_origin && is_stuck_result(s_n) ? reduce_rewrite(*s_origin, true) : none_expr();
-        if (t_r || s_r)
-            return is_def_eq_core(t_r ? *t_r : t_n, s_r ? *s_r : s_n);
-    }
 
     if (is_constant(t_n) && is_constant(s_n) && const_name(t_n) == const_name(s_n) &&
         is_def_eq(const_levels(t_n), const_levels(s_n)))
@@ -1436,10 +1428,21 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
     }
 
     // Invoke `whnf_core` again, but now using `whnf` to reduce projections.
+    /* Rules come last. A side whose unfolding started at a head with rules and got stuck gets them only
+       after every other check failed, so a rule never pre-empts a comparison that succeeds without it. */
+    auto rules_last = [&]() {
+        if (!t_origin && !s_origin)
+            return false;
+        rewrite_fuel_scope fuel(*this);
+        optional<expr> t_r = t_origin && is_stuck_result(t_n) ? reduce_rewrite(*t_origin, true) : none_expr();
+        optional<expr> s_r = s_origin && is_stuck_result(s_n) ? reduce_rewrite(*s_origin, true) : none_expr();
+        return (t_r || s_r) && is_def_eq_core(t_r ? *t_r : t_n, s_r ? *s_r : s_n);
+    };
+
     expr t_n_n = whnf_core(t_n);
     expr s_n_n = whnf_core(s_n);
     if (!is_eqp(t_n_n, t_n) || !is_eqp(s_n_n, s_n))
-        return is_def_eq_core(t_n_n, s_n_n);
+        return is_def_eq_core(t_n_n, s_n_n) || rules_last();
 
     // At this point, t_n and s_n are in weak head normal form (modulo metavariables and proof irrelevance)
     if (is_def_eq_app(t_n, s_n))
@@ -1457,7 +1460,7 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
     if (is_def_eq_unit_like(t_n, s_n))
         return true;
 
-    return false;
+    return rules_last();
 }
 
 bool type_checker::is_def_eq(expr const & t, expr const & s) {
