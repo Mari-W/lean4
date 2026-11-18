@@ -16,7 +16,7 @@ namespace lean {
 #define LEAN_REWRITE_FIRE_BUDGET 65536
 /* Firings allowed in one declaration's check. Lazy delta resets the budget above at every step, so
    a rule whose right-hand side unfolds back to its left-hand side needs this one to stop. */
-#define LEAN_REWRITE_DECL_BUDGET 16777216
+#define LEAN_REWRITE_DECL_BUDGET 4194304
 
 /* A user rewrite rule `∀ xs, l = r` read off its theorem. `m_lhs` and `m_rhs` live under the
    `m_nvars` binders `xs`: the loose bound variable `i` names `xs[m_nvars - 1 - i]`. */

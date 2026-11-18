@@ -724,8 +724,8 @@ def reduceRewriteStep? (e : Expr) : MetaM (Option Expr) := do
     if (← get).rewriteFires > 65536 then
       throwError "rewrite rule budget exhausted: `{.ofConstName cand.thm}` would fire past 65536 firings"
     modify fun s => { s with rewriteTotal := s.rewriteTotal + 1 }
-    if (← get).rewriteTotal > 16777216 then
-      throwError "rewrite rule budget exhausted: `{.ofConstName cand.thm}` would fire past 16777216 firings in this declaration"
+    if (← get).rewriteTotal > 4194304 then
+      throwError "rewrite rule budget exhausted: `{.ofConstName cand.thm}` would fire past 4194304 firings in this declaration"
     let rhs := (rule.rhs.instantiateLevelParams rule.levelParams ls).instantiateRev substs
     return some (mkAppN rhs (args.extract pargs.size args.size))
   return none
