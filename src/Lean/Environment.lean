@@ -219,11 +219,14 @@ under. A declaration with an empty rule set has no entry in `sets`.
 -/
 structure Rewrites where
   /-- Every registered rule, keyed by its theorem. -/
-  rules    : SMap Name RewriteRule := {}
+  rules    : SMap Name RewriteRule := SMap.empty.switch
   /-- The registered rules of each head constant, for the elaborator's lookup. -/
-  byHead   : SMap Name (Array Name) := {}
-  /-- The closed, canonical rule set `R(D)` of each declaration whose set is nonempty. -/
-  sets     : SMap Name (Array Name) := {}
+  byHead   : SMap Name (Array Name) := SMap.empty.switch
+  /--
+  The closed, canonical rule set `R(D)` of each declaration whose set is nonempty. Like the other
+  maps it starts in stage 2, so that adding to a shared environment does not copy the map.
+  -/
+  sets     : SMap Name (Array Name) := SMap.empty.switch
   /-- Rules registered since the import, in registration order. -/
   newRules : Array RewriteRule := #[]
   deriving Inhabited
