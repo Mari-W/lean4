@@ -475,13 +475,39 @@ bool type_checker::match_rewrite_pattern(rewrite_rule const & rule, expr const &
 
 /* Fire rules at the head of `e` as long as one matches. Iterating here keeps a cycle of rules from
    nesting `whnf_core` calls, so the firing budget rather than the recursion limit stops it. */
-optional<expr> type_checker::reduce_rewrite(expr const & e) {
-    optional<expr> r = reduce_rewrite_step(e);
+optional<expr> type_checker::reduce_rewrite(expr const & e, bool stuck) {
+    optional<expr> r = reduce_rewrite_step(e, stuck);
     if (!r)
         return r;
     while (optional<expr> r2 = reduce_rewrite_step(*r))
         r = r2;
     return r;
+}
+
+/* Whether `e`, a term no further reduction applies to, is stuck rather than a value. Rules on a head
+   that unfolds fire only when its unfolding ends stuck. */
+bool type_checker::is_stuck_result(expr const & e) {
+    switch (e.kind()) {
+    case expr_kind::Lambda: case expr_kind::Pi: case expr_kind::Sort: case expr_kind::Lit:
+        return false;
+    default:
+        break;
+    }
+    expr const & f = get_app_fn(e);
+    if (is_constant(f)) {
+        if (optional<constant_info> ci = env().find(const_name(f)))
+            return !ci->is_constructor();
+    }
+    return true;
+}
+
+/* Remember `e` before it unfolds, the outermost such term first, if rules exist for its head. */
+void type_checker::note_rewrite_origin(expr const & e, optional<expr> & origin) {
+    if (origin || m_rules.empty())
+        return;
+    expr const & f = get_app_fn(e);
+    if (is_constant(f) && m_rules.has_head(const_name(f)) && is_delta(e))
+        origin = e;
 }
 
 /* `LEAN_REWRITE_CHECK_ARGS=1` makes every firing type-check the matched arguments against the
@@ -506,7 +532,9 @@ void type_checker::check_rewrite_args(rewrite_rule const & rule, levels const & 
 }
 
 /* Fire the first rule of `m_rules` whose left-hand side matches a prefix of the application `e`. */
-optional<expr> type_checker::reduce_rewrite_step(expr const & e) {
+/* `stuck` says that the caller unfolded `e` and the result was stuck. Otherwise a rule on a head
+   that unfolds does not fire, so delta comes first. */
+optional<expr> type_checker::reduce_rewrite_step(expr const & e, bool stuck) {
     if (m_rules.empty())
         return none_expr();
     expr const & f = get_app_fn(e);
@@ -514,6 +542,8 @@ optional<expr> type_checker::reduce_rewrite_step(expr const & e) {
         return none_expr();
     std::vector<rewrite_rule> const * rules = m_rules.find(const_name(f));
     if (!rules)
+        return none_expr();
+    if (!stuck && is_delta(e))
         return none_expr();
     buffer<expr> args;
     get_app_args(e, args);
@@ -926,13 +956,25 @@ expr type_checker::whnf(expr const & e) {
 
     rewrite_fuel_scope fuel(*this);
     expr t = e;
+    optional<expr> origin;
     while (true) {
         expr t1 = whnf_core(t);
         if (auto v = reduce_nat(t1)) {
             m_st->m_whnf.insert(mk_pair(e, *v));
             return *v;
         } else if (auto next_t = unfold_definition(t1)) {
+            note_rewrite_origin(t1, origin);
             t = *next_t;
+        } else if (origin && is_stuck_result(t1)) {
+            /* the unfolding of a head with rules got stuck, so its rules get their turn */
+            optional<expr> r = reduce_rewrite(*origin, true);
+            origin = none_expr();
+            if (r) {
+                t = *r;
+            } else {
+                m_st->m_whnf.insert(mk_pair(e, t1));
+                return t1;
+            }
         } else {
             auto r = t1;
             m_st->m_whnf.insert(mk_pair(e, r));
@@ -1251,8 +1293,11 @@ lbool type_checker::is_def_eq_offset(expr const & t, expr const & s) {
 }
 
 /** \remark t_n, s_n are updated. */
-lbool type_checker::lazy_delta_reduction(expr & t_n, expr & s_n) {
+lbool type_checker::lazy_delta_reduction(expr & t_n, expr & s_n, optional<expr> & t_origin,
+                                         optional<expr> & s_origin) {
     while (true) {
+        note_rewrite_origin(t_n, t_origin);
+        note_rewrite_origin(s_n, s_origin);
         lbool r = is_def_eq_offset(t_n, s_n);
         if (r != l_undef) return r;
 
@@ -1363,8 +1408,18 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
     if (r != l_undef) return r == l_true;
 
     /* NB: `lazy_delta_reduction` updates `t_n` and `s_n` even when returning `l_undef`. */
-    r = lazy_delta_reduction(t_n, s_n);
+    optional<expr> t_origin, s_origin;
+    r = lazy_delta_reduction(t_n, s_n, t_origin, s_origin);
     if (r != l_undef) return r == l_true;
+
+    /* Both sides are stuck. A side whose unfolding started at a head with rules gets them now. */
+    if (t_origin || s_origin) {
+        rewrite_fuel_scope fuel(*this);
+        optional<expr> t_r = t_origin && is_stuck_result(t_n) ? reduce_rewrite(*t_origin, true) : none_expr();
+        optional<expr> s_r = s_origin && is_stuck_result(s_n) ? reduce_rewrite(*s_origin, true) : none_expr();
+        if (t_r || s_r)
+            return is_def_eq_core(t_r ? *t_r : t_n, s_r ? *s_r : s_n);
+    }
 
     if (is_constant(t_n) && is_constant(s_n) && const_name(t_n) == const_name(s_n) &&
         is_def_eq(const_levels(t_n), const_levels(s_n)))

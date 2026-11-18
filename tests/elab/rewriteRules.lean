@@ -1,7 +1,7 @@
 import Lean
 /-!
 Kernel rewrite rules end to end: a rule on an axiom head (Symbol style), a rule on a `def` that
-wins over unfolding, a declaration that checks only because of a rule, scoping with
+fires only when its unfolding gets stuck, a declaration that checks only because of a rule, scoping with
 `rewrite_rules … in` and scoped and local attributes, propagation to dependents, `#print rules`,
 priorities, the firing budget, the checks at registration, non-linear rules, and global rules.
 -/
@@ -121,14 +121,14 @@ end
 #guard_msgs in
 #print rules plus_one_one
 
-/-! ## A rule on a `def` wins over unfolding -/
+/-! ## A rule on a `def` fires only when unfolding gets stuck -/
 
 def swap (p : Nat × Nat) : Nat × Nat := (p.2, p.1)
 
 @[rewrite] theorem swap_mk (a b : Nat) : swap (a, b) = (b, a) := rfl
 
--- The kernel's weak head normal form of `swap (1, 2)` unfolds `swap` without the rule and fires
--- the rule with it.
+-- The kernel's weak head normal form of `swap (1, 2)` unfolds `swap` to a pair, a value, so the rule
+-- does not fire. The global section below has a rule that fires where unfolding gets stuck.
 def kernelWhnf (e : Expr) (rules : Array Name) : CommandElabM Unit := do
   let r ← ofExceptKernelException <| Kernel.whnf (← getEnv) {} e rules
   logInfo m!"{r}"
@@ -140,7 +140,7 @@ def swapOneTwo : Expr :=
 #guard_msgs in
 run_cmd kernelWhnf swapOneTwo #[]
 
-/-- info: (2, 1) -/
+/-- info: ((1, 2).snd, (1, 2).fst) -/
 #guard_msgs in
 run_cmd kernelWhnf swapOneTwo #[``swap_mk]
 
@@ -256,6 +256,39 @@ example (h : g₂ 2 3 = 2) : True := by
   trivial
 
 end RewriteRulesTest.NonLinear
+
+/-! ## A rule on a `def` fires where its unfolding gets stuck: `0 + n = n` -/
+
+namespace RewriteRulesTest.Stuck
+open Lean Elab Command
+
+@[rewrite] theorem zero_add' (n : Nat) : Nat.zero + n = n := Nat.zero_add n
+
+-- `∀ n : Nat, 0 + n = n`, proved by `fun n => Eq.refl n` and sent to the kernel directly. `+`
+-- recurses on its second argument, so unfolding `0 + n` gets stuck on `n` and the rule fires.
+def zeroAddTy : Expr :=
+  let zero := mkApp3 (mkConst ``OfNat.ofNat [0]) (mkConst ``Nat) (mkRawNatLit 0)
+    (mkApp (mkConst ``instOfNatNat) (mkRawNatLit 0))
+  let add := mkApp6 (mkConst ``HAdd.hAdd [0, 0, 0]) (mkConst ``Nat) (mkConst ``Nat) (mkConst ``Nat)
+    (mkApp2 (mkConst ``instHAdd [0]) (mkConst ``Nat) (mkConst ``instAddNat)) zero (mkBVar 0)
+  mkForall `n .default (mkConst ``Nat) (mkApp3 (mkConst ``Eq [1]) (mkConst ``Nat) add (mkBVar 0))
+
+def zeroAddVal : Expr :=
+  mkLambda `n .default (mkConst ``Nat) (mkApp2 (mkConst ``Eq.refl [1]) (mkConst ``Nat) (mkBVar 0))
+
+/--
+error: (kernel) declaration type mismatch, 'RewriteRulesTest.Stuck.without' has type
+  ∀ (n : Nat), n = n
+but it is expected to have type
+  ∀ (n : Nat), 0 + n = n
+-/
+#guard_msgs in
+run_cmd addRflDecl `RewriteRulesTest.Stuck.without zeroAddTy zeroAddVal
+
+rewrite_rules zero_add' in
+run_cmd addRflDecl `RewriteRulesTest.Stuck.withRule zeroAddTy zeroAddVal
+
+end RewriteRulesTest.Stuck
 
 /-! ## Global rules, last because they are in force for every later declaration -/
 

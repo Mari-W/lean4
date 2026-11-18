@@ -92,9 +92,11 @@ private:
                            buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks);
     bool match_rewrite_pattern(rewrite_rule const & rule, expr const & p, expr const & t, buffer<expr> & subst,
                                buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks);
-    optional<expr> reduce_rewrite_step(expr const & e);
+    optional<expr> reduce_rewrite_step(expr const & e, bool stuck = false);
     void check_rewrite_args(rewrite_rule const & rule, levels const & us, buffer<expr> const & subst);
-    optional<expr> reduce_rewrite(expr const & e);
+    optional<expr> reduce_rewrite(expr const & e, bool stuck = false);
+    bool is_stuck_result(expr const & e);
+    void note_rewrite_origin(expr const & e, optional<expr> & origin);
     optional<expr> reduce_proj_core(expr c, name const & sname, unsigned idx);
     optional<expr> reduce_proj(expr const & e, bool cheap_rec, bool cheap_proj);
     expr whnf_fvar(expr const & e, bool cheap_rec, bool cheap_proj);
@@ -125,7 +127,7 @@ private:
     bool succeeded_before(expr const & t, expr const & s) const;
     void cache_success(expr const & t, expr const & s);
     reduction_status lazy_delta_reduction_step(expr & t_n, expr & s_n);
-    lbool lazy_delta_reduction(expr & t_n, expr & s_n);
+    lbool lazy_delta_reduction(expr & t_n, expr & s_n, optional<expr> & t_origin, optional<expr> & s_origin);
     bool lazy_delta_proj_reduction(expr & t_n, expr & s_n, name const & sname, nat const & idx);
     bool is_def_eq_core(expr const & t, expr const & s);
     /** \brief Like \c check, but ignores undefined universes */
