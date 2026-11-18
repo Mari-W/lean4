@@ -305,28 +305,17 @@ goto v_resetjp_21_;
 }
 v_resetjp_21_:
 {
-uint8_t v___y_25_; lean_object* v___x_31_; uint8_t v___x_32_; 
-v___x_31_ = ((lean_object*)(l_Int_Internal_Linear_Poly_isNonlinear___redArg___closed__2));
-v___x_32_ = l_Lean_Expr_isAppOf(v_a_18_, v___x_31_);
+lean_object* v___x_30_; uint8_t v___x_31_; 
+v___x_30_ = ((lean_object*)(l_Int_Internal_Linear_Poly_isNonlinear___redArg___closed__2));
+v___x_31_ = l_Lean_Expr_isAppOf(v_a_18_, v___x_30_);
 lean_dec(v_a_18_);
-if (v___x_32_ == 0)
+if (v___x_31_ == 0)
 {
-lean_object* v___x_33_; uint8_t v___x_34_; 
-v___x_33_ = ((lean_object*)(l_Int_Internal_Linear_Poly_isNonlinear___redArg___closed__5));
-v___x_34_ = l_Lean_Expr_isAppOf(v_a_20_, v___x_33_);
+lean_object* v___x_32_; uint8_t v___x_33_; 
+v___x_32_ = ((lean_object*)(l_Int_Internal_Linear_Poly_isNonlinear___redArg___closed__5));
+v___x_33_ = l_Lean_Expr_isAppOf(v_a_20_, v___x_32_);
 lean_dec(v_a_20_);
-v___y_25_ = v___x_34_;
-goto v___jp_24_;
-}
-else
-{
-lean_dec(v_a_20_);
-v___y_25_ = v___x_32_;
-goto v___jp_24_;
-}
-v___jp_24_:
-{
-if (v___y_25_ == 0)
+if (v___x_33_ == 0)
 {
 lean_del_object(v___x_22_);
 v_p_11_ = v_p_16_;
@@ -334,26 +323,36 @@ goto _start;
 }
 else
 {
-lean_object* v___x_27_; lean_object* v___x_29_; 
-v___x_27_ = lean_box(v___y_25_);
-if (v_isShared_23_ == 0)
-{
-lean_ctor_set(v___x_22_, 0, v___x_27_);
-v___x_29_ = v___x_22_;
-goto v_reusejp_28_;
+goto v___jp_24_;
+}
 }
 else
 {
-lean_object* v_reuseFailAlloc_30_; 
-v_reuseFailAlloc_30_ = lean_alloc_ctor(0, 1, 0);
-lean_ctor_set(v_reuseFailAlloc_30_, 0, v___x_27_);
-v___x_29_ = v_reuseFailAlloc_30_;
-goto v_reusejp_28_;
+lean_dec(v_a_20_);
+goto v___jp_24_;
 }
-v_reusejp_28_:
+v___jp_24_:
 {
-return v___x_29_;
+uint8_t v___x_25_; lean_object* v___x_26_; lean_object* v___x_28_; 
+v___x_25_ = 1;
+v___x_26_ = lean_box(v___x_25_);
+if (v_isShared_23_ == 0)
+{
+lean_ctor_set(v___x_22_, 0, v___x_26_);
+v___x_28_ = v___x_22_;
+goto v_reusejp_27_;
 }
+else
+{
+lean_object* v_reuseFailAlloc_29_; 
+v_reuseFailAlloc_29_ = lean_alloc_ctor(0, 1, 0);
+lean_ctor_set(v_reuseFailAlloc_29_, 0, v___x_26_);
+v___x_28_ = v_reuseFailAlloc_29_;
+goto v_reusejp_27_;
+}
+v_reusejp_27_:
+{
+return v___x_28_;
 }
 }
 }
@@ -911,9 +910,9 @@ return v___x_263_;
 LEAN_EXPORT lean_object* l_Int_Internal_Linear_Poly_normCommRing_x3f___lam__0___boxed(lean_object* v_a_266_, lean_object* v_s_267_){
 _start:
 {
-uint8_t v_a_124155__boxed_268_; lean_object* v_res_269_; 
-v_a_124155__boxed_268_ = lean_unbox(v_a_266_);
-v_res_269_ = l_Int_Internal_Linear_Poly_normCommRing_x3f___lam__0(v_a_124155__boxed_268_, v_s_267_);
+uint8_t v_a_124157__boxed_268_; lean_object* v_res_269_; 
+v_a_124157__boxed_268_ = lean_unbox(v_a_266_);
+v_res_269_ = l_Int_Internal_Linear_Poly_normCommRing_x3f___lam__0(v_a_124157__boxed_268_, v_s_267_);
 return v_res_269_;
 }
 }

@@ -15,6 +15,8 @@ Author: Leonardo de Moura
 #include "kernel/kernel_exception.h"
 #include "kernel/type_checker.h"
 #include "kernel/quot.h"
+#include "kernel/rewrite_rules.h"
+#include "kernel/for_each_fn.h"
 
 namespace lean {
 extern "C" object* lean_environment_add(object*, object*);
@@ -25,6 +27,13 @@ extern "C" object* lean_kernel_record_unfold (object*, object*);
 extern "C" object* lean_kernel_get_diag(object*);
 extern "C" object* lean_kernel_set_diag(object*, object*);
 extern "C" uint8 lean_kernel_diag_is_enabled(object*);
+extern "C" uint8 lean_kernel_has_rewrite_rules(object*);
+extern "C" object* lean_kernel_rewrite_head(object*, object*);
+extern "C" object* lean_kernel_rewrite_set(object*, object*);
+extern "C" object* lean_kernel_close_rewrite_set(object*, object*, object*);
+extern "C" object* lean_kernel_set_rewrite_set(object*, object*, object*);
+extern "C" object* lean_kernel_register_rewrite(object*, object*, object*, object*);
+extern "C" object* lean_kernel_rewrite_prio(object*, object*);
 
 void diagnostics::record_unfold(name const & decl_name) {
     m_obj = lean_kernel_record_unfold(m_obj, decl_name.to_obj_arg());
@@ -131,13 +140,15 @@ static void check_constant_val(environment const & env, constant_val const & v, 
     checker.ensure_sort(sort, v.get_type());
 }
 
-static void check_constant_val(environment const & env, constant_val const & v, diagnostics * diag, definition_safety ds) {
-    type_checker checker(env, diag, ds);
+static void check_constant_val(environment const & env, constant_val const & v, diagnostics * diag, definition_safety ds,
+                               rewrite_rule_table const & rules) {
+    type_checker checker(env, diag, ds, rules);
     check_constant_val(env, v, checker);
 }
 
-static void check_constant_val(environment const & env, constant_val const & v, diagnostics * diag, bool safe_only) {
-    check_constant_val(env, v, diag, safe_only ? definition_safety::safe : definition_safety::unsafe);
+static void check_constant_val(environment const & env, constant_val const & v, diagnostics * diag, bool safe_only,
+                               rewrite_rule_table const & rules) {
+    check_constant_val(env, v, diag, safe_only ? definition_safety::safe : definition_safety::unsafe, rules);
 }
 
 void environment::add_core(constant_info const & info) {
@@ -148,27 +159,27 @@ environment environment::add(constant_info const & info) const {
     return environment(lean_environment_add(to_obj_arg(), info.to_obj_arg()));
 }
 
-environment environment::add_axiom(declaration const & d, bool check) const {
+environment environment::add_axiom(declaration const & d, bool check, rewrite_rule_table const & rules) const {
     scoped_diagnostics diag(*this, check);
     axiom_val const & v = d.to_axiom_val();
     if (check)
-        check_constant_val(*this, v.to_constant_val(), diag.get(), !d.is_unsafe());
+        check_constant_val(*this, v.to_constant_val(), diag.get(), !d.is_unsafe(), rules);
     return diag.update(add(constant_info(d)));
 }
 
-environment environment::add_definition(declaration const & d, bool check) const {
+environment environment::add_definition(declaration const & d, bool check, rewrite_rule_table const & rules) const {
     scoped_diagnostics diag(*this, check);
     definition_val const & v = d.to_definition_val();
     if (v.is_unsafe()) {
         /* Meta definition can be recursive.
            So, we check the header, add, and then type check the body. */
         if (check) {
-            type_checker checker(*this, diag.get(), definition_safety::unsafe);
+            type_checker checker(*this, diag.get(), definition_safety::unsafe, rules);
             check_constant_val(*this, v.to_constant_val(), checker);
         }
         environment new_env = add(constant_info(d));
         if (check) {
-            type_checker checker(new_env, diag.get(), definition_safety::unsafe);
+            type_checker checker(new_env, diag.get(), definition_safety::unsafe, rules);
             check_no_metavar_no_fvar(new_env, v.get_name(), v.get_value());
             expr val_type = checker.check(v.get_value(), v.get_lparams());
             if (!checker.is_def_eq(val_type, v.get_type()))
@@ -177,7 +188,7 @@ environment environment::add_definition(declaration const & d, bool check) const
         return diag.update(new_env);
     } else {
         if (check) {
-            type_checker checker(*this, diag.get());
+            type_checker checker(*this, diag.get(), definition_safety::safe, rules);
             check_constant_val(*this, v.to_constant_val(), checker);
             check_no_metavar_no_fvar(*this, v.get_name(), v.get_value());
             expr val_type = checker.check(v.get_value(), v.get_lparams());
@@ -188,11 +199,11 @@ environment environment::add_definition(declaration const & d, bool check) const
     }
 }
 
-environment environment::add_theorem(declaration const & d, bool check) const {
+environment environment::add_theorem(declaration const & d, bool check, rewrite_rule_table const & rules) const {
     scoped_diagnostics diag(*this, check);
     theorem_val const & v = d.to_theorem_val();
     if (check) {
-        type_checker checker(*this, diag.get());
+        type_checker checker(*this, diag.get(), definition_safety::safe, rules);
         sharecommon_persistent_fn share;
         expr val(share(v.get_value().raw()));
         expr type(share(v.get_type().raw()));
@@ -207,11 +218,11 @@ environment environment::add_theorem(declaration const & d, bool check) const {
     return diag.update(add(constant_info(d)));
 }
 
-environment environment::add_opaque(declaration const & d, bool check) const {
+environment environment::add_opaque(declaration const & d, bool check, rewrite_rule_table const & rules) const {
     scoped_diagnostics diag(*this, check);
     opaque_val const & v = d.to_opaque_val();
     if (check) {
-        type_checker checker(*this, diag.get());
+        type_checker checker(*this, diag.get(), definition_safety::safe, rules);
         check_constant_val(*this, v.to_constant_val(), checker);
         check_no_metavar_no_fvar(*this, v.get_name(), v.get_value());
         expr val_type = checker.check(v.get_value(), v.get_lparams());
@@ -221,7 +232,7 @@ environment environment::add_opaque(declaration const & d, bool check) const {
     return diag.update(add(constant_info(d)));
 }
 
-environment environment::add_mutual(declaration const & d, bool check) const {
+environment environment::add_mutual(declaration const & d, bool check, rewrite_rule_table const & rules) const {
     scoped_diagnostics diag(*this, check);
     definition_vals const & vs = d.to_definition_vals();
     if (empty(vs))
@@ -232,7 +243,7 @@ environment environment::add_mutual(declaration const & d, bool check) const {
     names const & lparams = head(vs).get_lparams();
     /* Check declarations header */
     if (check) {
-        type_checker checker(*this, diag.get(), safety);
+        type_checker checker(*this, diag.get(), safety, rules);
         name_set found;
         for (definition_val const & v : vs) {
             if (v.get_safety() != safety)
@@ -256,7 +267,7 @@ environment environment::add_mutual(declaration const & d, bool check) const {
     }
     /* Check actual definitions */
     if (check) {
-        type_checker checker(new_env, diag.get(), safety);
+        type_checker checker(new_env, diag.get(), safety, rules);
         for (definition_val const & v : vs) {
             check_no_metavar_no_fvar(new_env, v.get_name(), v.get_value());
             expr val_type = checker.check(v.get_value(), v.get_lparams());
@@ -267,35 +278,196 @@ environment environment::add_mutual(declaration const & d, bool check) const {
     return diag.update(new_env);
 }
 
-environment environment::add(declaration const & d, bool check) const {
+/* The constants of the statements and values in `d`. */
+static array_ref<name> get_decl_constants(declaration const & d) {
+    name_set seen;
+    buffer<name> consts;
+    auto collect = [&](expr const & e) {
+        for_each(e, [&](expr const & e) {
+                if (is_constant(e) && !seen.contains(const_name(e))) {
+                    seen.insert(const_name(e));
+                    consts.push_back(const_name(e));
+                }
+                return true;
+            });
+    };
     switch (d.kind()) {
-    case declaration_kind::Axiom:            return add_axiom(d, check);
-    case declaration_kind::Definition:       return add_definition(d, check);
-    case declaration_kind::Theorem:          return add_theorem(d, check);
-    case declaration_kind::Opaque:           return add_opaque(d, check);
-    case declaration_kind::MutualDefinition: return add_mutual(d, check);
-    case declaration_kind::Quot:             return add_quot();
-    case declaration_kind::Inductive:        return add_inductive(d);
+    case declaration_kind::Axiom:
+        collect(d.to_axiom_val().get_type());
+        break;
+    case declaration_kind::Definition:
+        collect(d.to_definition_val().get_type());
+        collect(d.to_definition_val().get_value());
+        break;
+    case declaration_kind::Theorem:
+        collect(d.to_theorem_val().get_type());
+        collect(d.to_theorem_val().get_value());
+        break;
+    case declaration_kind::Opaque:
+        collect(d.to_opaque_val().get_type());
+        collect(d.to_opaque_val().get_value());
+        break;
+    case declaration_kind::MutualDefinition:
+        for (definition_val const & v : d.to_definition_vals()) {
+            collect(v.get_type());
+            collect(v.get_value());
+        }
+        break;
+    case declaration_kind::Inductive:
+        for (inductive_type const & t : inductive_decl(d).get_types()) {
+            collect(t.get_type());
+            for (constructor const & c : t.get_cnstrs())
+                collect(constructor_type(c));
+        }
+        break;
+    case declaration_kind::Quot:
+        break;
     }
-    lean_unreachable();
+    return array_ref<name>(consts);
 }
+
+/* The constants `d` added to `new_env`, all of which are checked under one rule set. */
+static void get_added_names(environment const & old_env, environment const & new_env, declaration const & d, buffer<name> & r) {
+    switch (d.kind()) {
+    case declaration_kind::Axiom:
+        r.push_back(d.to_axiom_val().get_name());
+        break;
+    case declaration_kind::Definition:
+        r.push_back(d.to_definition_val().get_name());
+        break;
+    case declaration_kind::Theorem:
+        r.push_back(d.to_theorem_val().get_name());
+        break;
+    case declaration_kind::Opaque:
+        r.push_back(d.to_opaque_val().get_name());
+        break;
+    case declaration_kind::MutualDefinition:
+        for (definition_val const & v : d.to_definition_vals())
+            r.push_back(v.get_name());
+        break;
+    case declaration_kind::Inductive:
+        for (inductive_type const & t : inductive_decl(d).get_types()) {
+            r.push_back(t.get_name());
+            for (constructor const & c : t.get_cnstrs())
+                r.push_back(constructor_name(c));
+            r.push_back(name(t.get_name(), "rec"));
+            /* auxiliary recursors of nested inductives */
+            for (unsigned i = 1; ; i++) {
+                name aux(t.get_name(), (std::string("rec_") + std::to_string(i)).c_str());
+                if (old_env.find(aux) || !new_env.find(aux))
+                    break;
+                r.push_back(aux);
+            }
+        }
+        break;
+    case declaration_kind::Quot:
+        break;
+    }
+}
+
+environment environment::add(declaration const & d, bool check, array_ref<name> const & explicit_rules) const {
+    if (d.kind() == declaration_kind::Quot)
+        return add_quot();
+    for (name const & h : explicit_rules) {
+        if (!get_rewrite_head(h))
+            throw kernel_exception(*this, sstream() << "unknown rewrite rule '" << h << "'");
+    }
+    if (explicit_rules.size() == 0 && !has_rewrite_rules()) {
+        rewrite_rule_table none;
+        switch (d.kind()) {
+        case declaration_kind::Axiom:            return add_axiom(d, check, none);
+        case declaration_kind::Definition:       return add_definition(d, check, none);
+        case declaration_kind::Theorem:          return add_theorem(d, check, none);
+        case declaration_kind::Opaque:           return add_opaque(d, check, none);
+        case declaration_kind::MutualDefinition: return add_mutual(d, check, none);
+        case declaration_kind::Inductive:        return add_inductive(d, none);
+        case declaration_kind::Quot:             break;
+        }
+        lean_unreachable();
+    }
+    array_ref<name> set = close_rewrite_set(explicit_rules, get_decl_constants(d));
+    rewrite_rule_table rules(*this, set);
+    environment new_env = *this;
+    switch (d.kind()) {
+    case declaration_kind::Axiom:            new_env = add_axiom(d, check, rules); break;
+    case declaration_kind::Definition:       new_env = add_definition(d, check, rules); break;
+    case declaration_kind::Theorem:          new_env = add_theorem(d, check, rules); break;
+    case declaration_kind::Opaque:           new_env = add_opaque(d, check, rules); break;
+    case declaration_kind::MutualDefinition: new_env = add_mutual(d, check, rules); break;
+    case declaration_kind::Inductive:        new_env = add_inductive(d, rules); break;
+    case declaration_kind::Quot:             lean_unreachable();
+    }
+    if (set.size() > 0) {
+        buffer<name> added;
+        get_added_names(*this, new_env, d, added);
+        for (name const & n : added)
+            new_env = new_env.set_rewrite_set(n, set);
+    }
+    return new_env;
+}
+
+bool environment::has_rewrite_rules() const {
+    return lean_kernel_has_rewrite_rules(to_obj_arg()) != 0;
+}
+
+optional<name> environment::get_rewrite_head(name const & thm) const {
+    return to_optional<name>(lean_kernel_rewrite_head(to_obj_arg(), thm.to_obj_arg()));
+}
+
+array_ref<name> environment::get_rewrite_set(name const & n) const {
+    return array_ref<name>(lean_kernel_rewrite_set(to_obj_arg(), n.to_obj_arg()));
+}
+
+array_ref<name> environment::close_rewrite_set(array_ref<name> const & explicit_rules, array_ref<name> const & consts) const {
+    return array_ref<name>(lean_kernel_close_rewrite_set(to_obj_arg(), explicit_rules.to_obj_arg(), consts.to_obj_arg()));
+}
+
+environment environment::set_rewrite_set(name const & n, array_ref<name> const & s) const {
+    return environment(lean_kernel_set_rewrite_set(to_obj_arg(), n.to_obj_arg(), s.to_obj_arg()));
+}
+
+environment environment::register_rewrite_rule(name const & thm, name const & head, nat const & prio) const {
+    return environment(lean_kernel_register_rewrite(to_obj_arg(), thm.to_obj_arg(), head.to_obj_arg(), prio.to_obj_arg()));
+}
+
+nat environment::get_rewrite_prio(name const & thm) const {
+    return nat(lean_kernel_rewrite_prio(to_obj_arg(), thm.to_obj_arg()));
+}
+
+environment environment::add_rewrite_rule(name const & thm, nat const & prio) const {
+    constant_info info = get(thm);
+    if (!info.is_theorem())
+        throw kernel_exception(*this, sstream() << "invalid rewrite rule '" << thm << "', it is not a theorem");
+    if (get_rewrite_head(thm))
+        throw kernel_exception(*this, sstream() << "'" << thm << "' is already a rewrite rule");
+    rewrite_rule r = read_rewrite_rule(*this, thm);
+    return register_rewrite_rule(thm, r.m_head, prio);
+}
+
 /*
 addDeclCore (env : Environment) (maxHeartbeats : USize) (maxRecDepth : USize) (decl : @& Declaration)
-  (cancelTk? : @& Option IO.CancelToken) : Except Kernel.Exception Environment
+  (cancelTk? : @& Option IO.CancelToken) (rules : @& Array Name) : Except Kernel.Exception Environment
 */
 extern "C" LEAN_EXPORT object * lean_add_decl(object * env, size_t max_heartbeat, size_t max_rec_depth,
-    object * decl, object * opt_cancel_tk) {
+    object * decl, object * opt_cancel_tk, object * rules) {
     scope_max_heartbeat s(max_heartbeat);
     scope_max_rec_depth s2(max_rec_depth);
     scope_cancel_tk s3(is_scalar(opt_cancel_tk) ? nullptr : cnstr_get(opt_cancel_tk, 0));
     return catch_kernel_exceptions<environment>([&]() {
-            return environment(env).add(declaration(decl, true));
+            return environment(env).add(declaration(decl, true), true, array_ref<name>(rules, true));
         });
 }
 
-extern "C" LEAN_EXPORT object * lean_add_decl_without_checking(object * env, object * decl) {
+extern "C" LEAN_EXPORT object * lean_add_decl_without_checking(object * env, object * decl, object * rules) {
     return catch_kernel_exceptions<environment>([&]() {
-            return environment(env).add(declaration(decl, true), false);
+            return environment(env).add(declaration(decl, true), false, array_ref<name>(rules, true));
+        });
+}
+
+/* addRewriteRule (env : Environment) (thm : @& Name) (prio : @& Nat) : Except Kernel.Exception Environment */
+extern "C" LEAN_EXPORT object * lean_add_rewrite_rule(object * env, object * thm, object * prio) {
+    return catch_kernel_exceptions<environment>([&]() {
+            return environment(env).add_rewrite_rule(name(thm, true), nat(prio, true));
         });
 }
 
