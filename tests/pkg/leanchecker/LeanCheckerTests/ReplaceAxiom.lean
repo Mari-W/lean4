@@ -20,6 +20,7 @@ open Lean Elab Meta in
   let kenv := Lean.Kernel.Environment.mk consts
     env.toKernelEnv.quotInit
     env.toKernelEnv.diagnostics
+    env.toKernelEnv.rewrites
     env.toKernelEnv.const2ModIdx
     (Lean.Kernel.Environment.extensions env.toKernelEnv)
     {}

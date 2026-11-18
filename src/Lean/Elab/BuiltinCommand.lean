@@ -530,6 +530,13 @@ def failIfSucceeds (x : CommandElabM Unit) : CommandElabM Unit := do
   -- update cached value as well
   modify ({ · with maxRecDepth := 0 })
 
+@[builtin_command_elab Parser.Command.rewriteRules] def elabRewriteRules : CommandElab := fun stx => do
+  for id in stx[1].getArgs do
+    let thm ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
+    if ((← getEnv).rewriteHead? thm).isNone then
+      throwErrorAt id "`{.ofConstName thm}` is not a rewrite rule, register it with `@[rewrite]`"
+    rewriteScopeExt.add thm .local
+
 open Lean.Parser.Command.InternalSyntax in
 @[builtin_macro Lean.Parser.Command.«in»] def expandInCmd : Macro
   | `($cmd₁ in%$tk $cmd₂) =>

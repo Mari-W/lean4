@@ -10,6 +10,7 @@ public import Lean.Meta.Sorry
 public import Lean.Util.CollectAxioms
 public import Lean.OriginalConstKind
 public import Lean.AutoDecl
+public import Lean.RewriteRules
 import Lean.Linter.Init
 import Lean.Compiler.MetaAttr
 import Lean.Util.RecDepth
@@ -21,16 +22,25 @@ namespace Lean
 
 /-- Adds given declaration to the environment, respecting `debug.skipKernelTC`. -/
 def Kernel.Environment.addDecl (env : Environment) (opts : Options) (decl : Declaration)
-    (cancelTk? : Option IO.CancelToken := none) : Except Exception Environment :=
+    (cancelTk? : Option IO.CancelToken := none) (rules : Array Name := #[]) : Except Exception Environment :=
   if debug.skipKernelTC.get opts then
-    addDeclWithoutChecking env decl
+    addDeclWithoutChecking env decl rules
   else
-    addDeclCore env (Core.getMaxHeartbeats opts).toUSize (maxRecDepth.get opts).toUSize decl cancelTk?
+    addDeclCore env (Core.getMaxHeartbeats opts).toUSize (maxRecDepth.get opts).toUSize decl cancelTk? rules
 
 private def Environment.addDeclAux (env : Environment) (opts : Options) (decl : Declaration)
-    (cancelTk? : Option IO.CancelToken := none) : Except Kernel.Exception Environment :=
+    (cancelTk? : Option IO.CancelToken := none) (rules : Array Name := #[]) : Except Kernel.Exception Environment :=
   env.addDeclCore (Core.getMaxHeartbeats opts).toUSize (maxRecDepth.get opts).toUSize decl cancelTk?
-    (!debug.skipKernelTC.get opts)
+    (!debug.skipKernelTC.get opts) rules
+
+/--
+Records for the elaborator the rule set the kernel will check `decl` under, given its explicit
+rules. The kernel computes and stores its own copy.
+-/
+private def recordRewriteSets (decl : Declaration) (rules : Array Name) (env : Environment) : Environment :=
+  if rules.isEmpty && !env.hasRewriteRules then env else
+    let set := env.closeRewriteSet rules decl.rewriteConsts
+    decl.getNames.foldl (fun env n => env.recordRewriteSet n set) env
 
 open Linter in
 /--
@@ -116,6 +126,9 @@ private def addDeclCore (decl : Declaration) (forceExpose : Bool) : CoreM Unit :
   -- namespaces
   modifyEnv (decl.getNames.foldl registerNamePrefixes)
 
+  let rules := getExplicitRewriteRules (← getEnv)
+  modifyEnv (recordRewriteSets decl rules)
+
   -- convert `Declaration` to `ConstantInfo` to use as a preliminary value in the environment until
   -- kernel checking has finished; not all cases are supported yet
   let mut exportedInfo? := none
@@ -197,7 +210,8 @@ where
       withTraceNode `Kernel (fun _ => return m!"typechecking declarations {decl.getTopLevelNames}") do
         warnIfUsesSorry decl
         try
-          let env ← (← getEnv).addDeclAux (← getOptions) decl (← read).cancelTk?
+          let rules := getExplicitRewriteRules (← getEnv)
+          let env ← (← getEnv).addDeclAux (← getOptions) decl (← read).cancelTk? rules
             |> ofExceptKernelException
           setEnv env
         catch ex =>

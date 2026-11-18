@@ -32,6 +32,8 @@ namespace Replay
 
 structure Context where
   newConstants : Std.HashMap Name ConstantInfo
+  /-- The rewrite rules of the source, registered again as their theorems are replayed. -/
+  rewrites : Rewrites := {}
 
 structure State where
   env : Kernel.Environment
@@ -55,11 +57,19 @@ def isTodo (name : Name) : M Bool := do
 def throwKernelException (ex : Kernel.Exception) : M Unit := do
   throw <| .userError <| (← ex.toMessageData {} |>.toString)
 
-/-- Add a declaration, possibly throwing a `Kernel.Exception`. -/
-def addDecl (d : Declaration) : M Unit := do
-  match (← get).env.addDeclCore 0 0 d (cancelTk? := none) with
+/--
+Add a declaration under the rule set the source checked `name` under, possibly throwing a
+`Kernel.Exception`. If `name` is a rewrite rule of the source, register it.
+-/
+def addDecl (name : Name) (d : Declaration) : M Unit := do
+  let rules := (← read).rewrites.sets.findD name #[]
+  match (← get).env.addDeclCore 0 0 d (cancelTk? := none) rules with
   | .ok env => modify fun s => { s with env := env }
   | .error ex => throwKernelException ex
+  if let some rule := (← read).rewrites.rules.find? name then
+    match (← get).env.addRewriteRule name rule.prio with
+    | .ok env => modify fun s => { s with env := env }
+    | .error ex => throwKernelException ex
 
 mutual
 /--
@@ -75,12 +85,15 @@ partial def replayConstant (name : Name) : M Unit := do
   if ← isTodo name then
     let some ci := (← read).newConstants[name]? | unreachable!
     replayConstants ci.getUsedConstantsAsSet
+    -- The rules `name` was checked under must be registered first.
+    for h in (← read).rewrites.sets.findD name #[] do
+      replayConstant h
     -- Check that this name is still pending: a mutual block may have taken care of it.
     if (← get).pending.contains name then
       try
         match ci with
         | .defnInfo   info =>
-          addDecl (Declaration.defnDecl   info)
+          addDecl name (Declaration.defnDecl   info)
         | .thmInfo    info =>
           -- Ignore duplicate theorems. This code is identical to that in `finalizeImport` before it
           -- added extended duplicates support for the module system, which is not relevant for us
@@ -94,11 +107,11 @@ partial def replayConstant (name : Name) : M Unit := do
               info.all == info'.all
             then
               return
-          addDecl (Declaration.thmDecl    info)
+          addDecl name (Declaration.thmDecl    info)
         | .axiomInfo  info =>
-          addDecl (Declaration.axiomDecl  info)
+          addDecl name (Declaration.axiomDecl  info)
         | .opaqueInfo info =>
-          addDecl (Declaration.opaqueDecl info)
+          addDecl name (Declaration.opaqueDecl info)
         | .inductInfo info =>
           let lparams := info.levelParams
           let nparams := info.numParams
@@ -117,7 +130,7 @@ partial def replayConstant (name : Name) : M Unit := do
             { name := ci.name
               type := ci.type
               ctors := ctors.map fun ci => { name := ci.name, type := ci.type } }
-          addDecl (Declaration.inductDecl lparams nparams types false)
+          addDecl name (Declaration.inductDecl lparams nparams types false)
         -- We postpone checking constructors,
         -- and at the end make sure they are identical
         -- to the constructors generated when we replay the inductives.
@@ -130,7 +143,7 @@ partial def replayConstant (name : Name) : M Unit := do
           -- `Quot.lift` and `Quot.ind` have types that reference `Eq`,
           -- so we need to ensure `Eq` is replayed before adding the quotient declaration.
           replayConstant `Eq
-          addDecl (Declaration.quotDecl)
+          addDecl name (Declaration.quotDecl)
         modify fun s => { s with pending := s.pending.erase name }
       catch ex =>
         throw <| .userError s!"while replaying declaration '{name}':\n{ex}"
@@ -172,9 +185,12 @@ open Replay
 
 Throws a `IO.userError` if the kernel rejects a constant,
 or if there are malformed recursors or constructors for inductive types.
+
+Each constant is checked under the rule set `rewrites` records for it, and the rewrite rules of
+`rewrites` are registered as their theorems are replayed.
 -/
-public def replay (newConstants : Std.HashMap Name ConstantInfo) (env : Kernel.Environment) :
-    IO Kernel.Environment := do
+public def replay (newConstants : Std.HashMap Name ConstantInfo) (env : Kernel.Environment)
+    (rewrites : Rewrites := {}) : IO Kernel.Environment := do
   let mut remaining : NameSet := ∅
   for (n, ci) in newConstants.toList do
     -- We skip unsafe constants, and also partial constants.
@@ -182,7 +198,7 @@ public def replay (newConstants : Std.HashMap Name ConstantInfo) (env : Kernel.E
     if !ci.isUnsafe && !ci.isPartial then
       remaining := remaining.insert n
   let (_, s) ← StateRefT'.run (s := { env, remaining }) do
-    ReaderT.run (r := { newConstants }) do
+    ReaderT.run (r := { newConstants, rewrites }) do
       for n in remaining do
         replayConstant n
       checkPostponedConstructors

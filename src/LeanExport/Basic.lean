@@ -259,18 +259,18 @@ public partial def dumpConstant (c : Name) : M Unit := do
   | .axiomInfo val => do
     dumpDeps val.type
     dumpObj [
-      ("axiom", Json.mkObj [
+      ("axiom", Json.mkObj <| ([
         ("name", ← dumpName val.name),
         ("levelParams", ← dumpUparams val.levelParams),
         ("type", ← dumpExpr val.type),
         ("isUnsafe", val.isUnsafe)
-      ])
+      ] : List (String × Json)) ++ (← dumpRuleSet c))
     ]
   | .defnInfo val => do
     dumpDeps val.type
     dumpDeps val.value
     dumpObj [
-      ("def", Json.mkObj [
+      ("def", Json.mkObj <| ([
         ("name", ← dumpName val.name),
         ("levelParams", ← dumpUparams val.levelParams),
         ("type", ← dumpExpr val.type),
@@ -278,33 +278,41 @@ public partial def dumpConstant (c : Name) : M Unit := do
         ("hints", val.hints.toJson),
         ("safety", val.safety.toJson),
         ("all", ← dumpNames val.all)
-      ])
+      ] : List (String × Json)) ++ (← dumpRuleSet c))
     ]
   | .opaqueInfo val => do
     dumpDeps val.type
     dumpDeps val.value
     dumpObj [
-      ("opaque", Json.mkObj [
+      ("opaque", Json.mkObj <| ([
         ("name", ← dumpName val.name),
         ("levelParams", ← dumpUparams val.levelParams),
         ("type", ← dumpExpr val.type),
         ("value", ← dumpExpr val.value),
         ("all", ← dumpNames val.all),
         ("isUnsafe", val.isUnsafe)
-      ])
+      ] : List (String × Json)) ++ (← dumpRuleSet c))
     ]
   | .thmInfo val => do
     dumpDeps val.type
     dumpDeps val.value
     dumpObj [
-      ("thm", Json.mkObj [
+      ("thm", Json.mkObj <| ([
         ("name", ← dumpName val.name),
         ("levelParams", ← dumpUparams val.levelParams),
         ("type", ← dumpExpr val.type),
         ("value", ← dumpExpr val.value),
         ("all", ← dumpNames val.all)
-      ])
+      ] : List (String × Json)) ++ (← dumpRuleSet c))
     ]
+    if let some rule := (← read).env.toKernelEnv.rewriteRule? val.name then
+      dumpObj [
+        ("rewrite", Json.mkObj [
+          ("name", ← dumpName rule.thm),
+          ("head", ← dumpName rule.head),
+          ("prio", rule.prio)
+        ])
+      ]
   | .quotInfo _ =>
     -- Always dump full Quot package in the sensible order
     dumpConstant ``Eq
@@ -403,12 +411,13 @@ public partial def dumpConstant (c : Name) : M Unit := do
           ("k", recursorVal.k),
           ("isUnsafe", recursorVal.isUnsafe),
       ]
+    let rewrites ← dumpRuleSet baseIndVal.name
     dumpObj [
-      ("inductive", Json.mkObj [
+      ("inductive", Json.mkObj <| ([
         ("types", inductiveValsJson.toJson),
         ("ctors", ctorValsJson.toJson),
         ("recs", recursorValsJson.toJson),
-      ])
+      ] : List (String × Json)) ++ rewrites)
     ]
   | .ctorInfo val => dumpConstant val.induct
   | .recInfo val =>
@@ -418,6 +427,17 @@ where
   dumpDeps e := do
     for c in e.getUsedConstants do
       dumpConstant c
+  /- The `rewrites` field listing `R(n)`, omitted when empty. Dumps each rule's theorem and
+  `rewrite` line first. -/
+  dumpRuleSet (n : Name) : M (List (String × Json)) := do
+    let rules := (← read).env.toKernelEnv.rewriteSet n
+    if rules.isEmpty then
+      return []
+    let mut idxs := #[]
+    for h in rules do
+      dumpConstant h
+      idxs := idxs.push (← dumpName h)
+    return [("rewrites", idxs.toJson)]
   /- Return these for inclusion inline with the exported `recInfo`. -/
   dumpRecRule (rule : RecursorRule) : M Json := do
     return Json.mkObj [
@@ -437,10 +457,10 @@ def exportMetadata : Json :=
   ]
   let exporterMeta := Json.mkObj [
     ("name", "lean4export"),
-    ("version", "3.1.0")
+    ("version", "3.2.0")
   ]
   let formatMeta := Json.mkObj [
-    ("version", "3.1.0")
+    ("version", "3.2.0")
   ]
 
   Json.mkObj [

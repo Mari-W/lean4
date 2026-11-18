@@ -648,6 +648,9 @@ See also: `#reduce e` for evaluation by term reduction.
 Please consult [the reference manual](lean-manual://section/validating-proofs) to understand the significance of the output. -/
 @[builtin_command_parser] def printAxioms    := leading_parser
   "#print " >> nonReservedSymbol "axioms " >> ident
+/-- Prints the rewrite rules a declaration was checked under, its rule set `R(D)`. -/
+@[builtin_command_parser] def printRules     := leading_parser
+  "#print " >> nonReservedSymbol "rules " >> ident
 @[builtin_command_parser] def printEqns      := leading_parser
   "#print " >> (nonReservedSymbol "equations " <|> nonReservedSymbol "eqns ") >> ident
 /--
@@ -909,6 +912,14 @@ def initializeKeyword := leading_parser
 @[builtin_command_parser] def «initialize» := leading_parser
   declModifiers false >> initializeKeyword >>
   optional (atomic (ident >> Term.typeSpec >> ppSpace >> Term.leftArrow)) >> Term.doSeq
+
+/--
+`rewrite_rules h₁ … hₙ` puts the registered rewrite rules `h₁ … hₙ` in force for the declarations
+of the current section: the kernel checks them under these rules and the rules the declarations
+they use were checked under. `rewrite_rules h₁ … hₙ in <command>` does so for a single command.
+-/
+@[builtin_command_parser] def rewriteRules := leading_parser
+  "rewrite_rules" >> many1 (ppSpace >> checkColGt >> ident)
 
 @[builtin_command_parser] def «in»  := trailing_parser
   withOpen (withSetOption (ppDedent (" in" >> ppLine >> commandParser)))

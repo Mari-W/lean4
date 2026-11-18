@@ -19,24 +19,24 @@ namespace lean {
    that throws C++ exceptions. */
 extern "C" obj_res lean_elab_environment_update_base_after_kernel_add(obj_arg env, obj_arg kenv);
 
-elab_environment elab_environment::add(declaration const & d, bool check) const {
-    environment kenv = to_kernel_env().add(d, check);
+elab_environment elab_environment::add(declaration const & d, bool check, array_ref<name> const & rules) const {
+    environment kenv = to_kernel_env().add(d, check, rules);
     return elab_environment(lean_elab_environment_update_base_after_kernel_add(this->to_obj_arg(), kenv.to_obj_arg()));
 }
 
 extern "C" LEAN_EXPORT object * lean_elab_add_decl(object * env, size_t max_heartbeat, size_t max_rec_depth,
-    object * decl, object * opt_cancel_tk) {
+    object * decl, object * opt_cancel_tk, object * rules) {
     scope_max_heartbeat s(max_heartbeat);
     scope_max_rec_depth s2(max_rec_depth);
     scope_cancel_tk s3(is_scalar(opt_cancel_tk) ? nullptr : cnstr_get(opt_cancel_tk, 0));
     return catch_kernel_exceptions<elab_environment>([&]() {
-            return elab_environment(env).add(declaration(decl, true));
+            return elab_environment(env).add(declaration(decl, true), true, array_ref<name>(rules, true));
         });
 }
 
-extern "C" LEAN_EXPORT object * lean_elab_add_decl_without_checking(object * env, object * decl) {
+extern "C" LEAN_EXPORT object * lean_elab_add_decl_without_checking(object * env, object * decl, object * rules) {
     return catch_kernel_exceptions<elab_environment>([&]() {
-            return elab_environment(env).add(declaration(decl, true), false);
+            return elab_environment(env).add(declaration(decl, true), false, array_ref<name>(rules, true));
         });
 }
 
@@ -45,24 +45,31 @@ environment elab_environment::to_kernel_env() const {
     return environment(lean_elab_environment_to_kernel_env(to_obj_arg()));
 }
 
-extern "C" LEAN_EXPORT lean_object * lean_kernel_is_def_eq(lean_object * obj_env, lean_object * lctx, lean_object * a, lean_object * b) {
+extern "C" LEAN_EXPORT lean_object * lean_kernel_is_def_eq(lean_object * obj_env, lean_object * lctx, lean_object * a, lean_object * b,
+                                                          b_lean_obj_arg rules) {
     elab_environment env(obj_env);
     return catch_kernel_exceptions<object*>([&]() {
-        return lean_box(type_checker(env.to_kernel_env(), local_ctx(lctx)).is_def_eq(expr(a), expr(b)));
+        environment kenv = env.to_kernel_env();
+        rewrite_rule_table table(kenv, array_ref<name>(rules, true));
+        return lean_box(type_checker(kenv, local_ctx(lctx), nullptr, definition_safety::safe, table).is_def_eq(expr(a), expr(b)));
     });
 }
 
-extern "C" LEAN_EXPORT lean_object * lean_kernel_whnf(lean_object * obj_env, lean_object * lctx, lean_object * a) {
+extern "C" LEAN_EXPORT lean_object * lean_kernel_whnf(lean_object * obj_env, lean_object * lctx, lean_object * a, b_lean_obj_arg rules) {
     elab_environment env(obj_env);
     return catch_kernel_exceptions<object*>([&]() {
-        return type_checker(env.to_kernel_env(), local_ctx(lctx)).whnf(expr(a)).steal();
+        environment kenv = env.to_kernel_env();
+        rewrite_rule_table table(kenv, array_ref<name>(rules, true));
+        return type_checker(kenv, local_ctx(lctx), nullptr, definition_safety::safe, table).whnf(expr(a)).steal();
     });
 }
 
-extern "C" LEAN_EXPORT lean_object * lean_kernel_check(lean_object * obj_env, lean_object * lctx, lean_object * a) {
+extern "C" LEAN_EXPORT lean_object * lean_kernel_check(lean_object * obj_env, lean_object * lctx, lean_object * a, b_lean_obj_arg rules) {
     elab_environment env(obj_env);
     return catch_kernel_exceptions<object*>([&]() {
-        return type_checker(env.to_kernel_env(), local_ctx(lctx)).check(expr(a)).steal();
+        environment kenv = env.to_kernel_env();
+        rewrite_rule_table table(kenv, array_ref<name>(rules, true));
+        return type_checker(kenv, local_ctx(lctx), nullptr, definition_safety::safe, table).check(expr(a)).steal();
     });
 }
 

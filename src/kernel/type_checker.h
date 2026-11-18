@@ -16,6 +16,7 @@ Author: Leonardo de Moura
 #include "kernel/environment.h"
 #include "kernel/local_ctx.h"
 #include "kernel/expr_maps.h"
+#include "kernel/rewrite_rules.h"
 
 namespace lean {
 /** \brief Lean Type Checker. It can also be used to infer types, check whether a
@@ -61,6 +62,12 @@ private:
     /* When `m_lparams != nullptr, the `check` method makes sure all level parameters
        are in `m_lparams`. */
     names const *             m_lparams;
+    /* The rules this checker fires, from the rule set `R(D)` it checks under. */
+    rewrite_rule_table        m_rules;
+    /* Rule firings since the outermost active `whnf`/`whnf_core` call, and the nesting depth of those calls. */
+    unsigned                  m_rewrite_fires = 0;
+    unsigned                  m_rewrite_depth = 0;
+    friend class rewrite_fuel_scope;
 
     expr ensure_sort_core(expr e, expr const & s);
     expr ensure_pi_core(expr e, expr const & s);
@@ -78,6 +85,15 @@ private:
 
     enum class reduction_status { Continue, DefUnknown, DefEqual, DefDiff };
     optional<expr> reduce_recursor(expr const & e, bool cheap_rec, bool cheap_proj);
+    bool match_rewrite_levels(rewrite_rule const & rule, levels const & ps, levels const & ls,
+                              buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks);
+    bool match_rewrite_app(rewrite_rule const & rule, expr const & p, expr const & t, buffer<expr> & subst,
+                           buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks);
+    bool match_rewrite_pattern(rewrite_rule const & rule, expr const & p, expr const & t, buffer<expr> & subst,
+                               buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks);
+    optional<expr> reduce_rewrite_step(expr const & e);
+    void check_rewrite_args(rewrite_rule const & rule, levels const & us, buffer<expr> const & subst);
+    optional<expr> reduce_rewrite(expr const & e);
     optional<expr> reduce_proj_core(expr c, name const & sname, unsigned idx);
     optional<expr> reduce_proj(expr const & e, bool cheap_rec, bool cheap_proj);
     expr whnf_fvar(expr const & e, bool cheap_rec, bool cheap_proj);
@@ -121,8 +137,10 @@ private:
     optional<expr> reduce_shiftLeft(expr const & e);
     optional<expr> reduce_nat(expr const & e);
 public:
-    type_checker(environment const & env, local_ctx const & lctx, diagnostics * diag = nullptr, definition_safety ds = definition_safety::safe);
-    type_checker(environment const & env, diagnostics * diag = nullptr, definition_safety ds = definition_safety::safe):type_checker(env, local_ctx(), diag, ds) {}
+    type_checker(environment const & env, local_ctx const & lctx, diagnostics * diag = nullptr, definition_safety ds = definition_safety::safe,
+                 rewrite_rule_table const & rules = rewrite_rule_table());
+    type_checker(environment const & env, diagnostics * diag = nullptr, definition_safety ds = definition_safety::safe,
+                 rewrite_rule_table const & rules = rewrite_rule_table()):type_checker(env, local_ctx(), diag, ds, rules) {}
     type_checker(type_checker const &) = delete;
     ~type_checker();
 

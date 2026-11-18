@@ -14,6 +14,7 @@ Author: Leonardo de Moura
 #include "util/rb_map.h"
 #include "util/name_set.h"
 #include "util/name_map.h"
+#include "runtime/array_ref.h"
 #include "kernel/expr.h"
 #include "kernel/declaration.h"
 
@@ -24,6 +25,7 @@ Author: Leonardo de Moura
 #endif
 
 namespace lean {
+class rewrite_rule_table;
 
 /* Wrapper for `Kernel.Diagnostics` */
 class diagnostics : public object_ref {
@@ -65,13 +67,15 @@ class LEAN_EXPORT environment : public object_ref {
     void add_core(constant_info const & info);
     void mark_quot_initialized();
     environment add(constant_info const & info) const;
-    environment add_axiom(declaration const & d, bool check) const;
-    environment add_definition(declaration const & d, bool check) const;
-    environment add_theorem(declaration const & d, bool check) const;
-    environment add_opaque(declaration const & d, bool check) const;
-    environment add_mutual(declaration const & d, bool check) const;
+    environment add_axiom(declaration const & d, bool check, rewrite_rule_table const & rules) const;
+    environment add_definition(declaration const & d, bool check, rewrite_rule_table const & rules) const;
+    environment add_theorem(declaration const & d, bool check, rewrite_rule_table const & rules) const;
+    environment add_opaque(declaration const & d, bool check, rewrite_rule_table const & rules) const;
+    environment add_mutual(declaration const & d, bool check, rewrite_rule_table const & rules) const;
     environment add_quot() const;
-    environment add_inductive(declaration const & d) const;
+    environment add_inductive(declaration const & d, rewrite_rule_table const & rules) const;
+    environment set_rewrite_set(name const & n, array_ref<name> const & s) const;
+    environment register_rewrite_rule(name const & thm, name const & head, nat const & prio) const;
 public:
     environment(environment const & other):object_ref(other) {}
     environment(environment && other) noexcept:object_ref(std::move(other)) {}
@@ -93,8 +97,22 @@ public:
     /** \brief Return information for the constant with name \c n. Throws and exception if constant declaration does not exist in this environment. */
     constant_info get(name const & n) const;
 
-    /** \brief Extends the current environment with the given declaration */
-    environment add(declaration const & d, bool check = true) const;
+    /** \brief Extends the current environment with the given declaration, checked under the
+        rule set `R(d)` closed from the explicit rules `rules`. */
+    environment add(declaration const & d, bool check = true, array_ref<name> const & rules = array_ref<name>()) const;
+
+    /** \brief Whether any rewrite rule is registered. */
+    bool has_rewrite_rules() const;
+    /** \brief The head of the registered rewrite rule `thm`, if `thm` is one. */
+    optional<name> get_rewrite_head(name const & thm) const;
+    /** \brief The priority of the registered rewrite rule `thm`. */
+    nat get_rewrite_prio(name const & thm) const;
+    /** \brief The stored rule set `R(n)`, empty if none is stored. */
+    array_ref<name> get_rewrite_set(name const & n) const;
+    /** \brief `canon(E ∪ ⋃_{h ∈ E} R(h) ∪ ⋃_{c ∈ consts} R(c))`. */
+    array_ref<name> close_rewrite_set(array_ref<name> const & explicit_rules, array_ref<name> const & consts) const;
+    /** \brief Checks that the stored theorem `thm` is a rewrite rule and registers it. */
+    environment add_rewrite_rule(name const & thm, nat const & prio) const;
 
     /** \brief Pointer equality */
     friend bool is_eqp(environment const & e1, environment const & e2) {

@@ -615,18 +615,152 @@ partial def consumeUnusedLet (e : Expr) (consumeNondep : Bool := false) : Expr :
   | .letE _ _ _ b nondep => if b.hasLooseBVars || (nondep && !consumeNondep) then e else consumeUnusedLet b consumeNondep
   | _ => e
 
+/-! # User rewrite rules
+
+A first-order matcher mirroring the kernel's (`type_checker::reduce_rewrite`): a pattern variable
+takes the subterm it meets, a constant application matches syntactically, and a failed match of a
+constant application is retried once on the weak head normal form of the subterm. -/
+
+private structure RewriteMatch where
+  args   : Array (Option Expr)
+  lvls   : Array (Option Level)
+  checks : Array (Level × Level) := #[]
+
+private def matchRewriteLevels (rule : RewriteRuleInfo) (ps ls : List Level) :
+    StateT RewriteMatch MetaM Bool := do
+  if ps.length != ls.length then
+    return false
+  for p in ps, l in ls do
+    match p with
+    | .param n =>
+      let some i := rule.levelParams.idxOf? n | return false
+      match (← get).lvls[i]? with
+      | some (some l') => if l' != l then return false
+      | _ => modify fun s => { s with lvls := s.lvls.set! i (some l) }
+    | _ => modify fun s => { s with checks := s.checks.push (p, l) }
+  return true
+
+mutual
+private partial def matchRewriteApp (rule : RewriteRuleInfo) (p t : Expr) :
+    StateT RewriteMatch MetaM Bool := do
+  let .const c ps := p.getAppFn | return false
+  let .const c' ls := t.getAppFn | return false
+  if c != c' || p.getAppNumArgs != t.getAppNumArgs then
+    return false
+  unless (← matchRewriteLevels rule ps ls) do
+    return false
+  for pa in p.getAppArgs, ta in t.getAppArgs do
+    unless (← matchRewritePattern rule pa ta) do
+      return false
+  return true
+
+private partial def matchRewritePattern (rule : RewriteRuleInfo) (p t : Expr) :
+    StateT RewriteMatch MetaM Bool := do
+  if let .bvar i := p then
+    modify fun s => { s with args := s.args.set! (rule.numVars - 1 - i) (some t) }
+    return true
+  let s₀ ← get
+  if (← matchRewriteApp rule p t) then
+    return true
+  set s₀
+  let t' ← (← whnf t).toCtorIfLit
+  if t' == t then
+    return false
+  matchRewriteApp rule p t'
+end
+
+private def levelParamsBound (rule : RewriteRuleInfo) (lvls : Array (Option Level)) : Level → Bool
+  | .param n => match rule.levelParams.idxOf? n with
+    | some i => (lvls[i]?.join).isSome
+    | none => true
+  | .succ l => levelParamsBound rule lvls l
+  | .max a b | .imax a b => levelParamsBound rule lvls a && levelParamsBound rule lvls b
+  | _ => true
+
+/--
+Fires the first active rewrite rule (`getActiveRewriteRules`) whose left-hand side matches a prefix
+of the application `e`. The rules of a head are tried by priority, highest first, then by
+`Name.cmp`, as in the kernel.
+-/
+def reduceRewriteStep? (e : Expr) : MetaM (Option Expr) := do
+  let .const f us := e.getAppFn | return none
+  let env ← getEnv
+  let registered := env.rewriteRulesFor f
+  if registered.isEmpty then
+    return none
+  let active ← getActiveRewriteRules
+  let cands := registered.filterMap fun h =>
+    if active.binSearchContains h (fun a b => a.cmp b == .lt) then env.rewriteRule? h else none
+  let cands := cands.qsort fun a b => a.prio > b.prio || (a.prio == b.prio && a.thm.cmp b.thm == .lt)
+  let args := e.getAppArgs
+  for cand in cands do
+    let some rule := getRewriteRuleInfo? env cand.thm | continue
+    let .const _ ps := rule.lhs.getAppFn | continue
+    let pargs := rule.lhs.getAppArgs
+    if args.size < pargs.size then
+      continue
+    let init : RewriteMatch :=
+      { args := .replicate rule.numVars none, lvls := .replicate rule.levelParams.length none }
+    let go : StateT RewriteMatch MetaM Bool := do
+      unless (← matchRewriteLevels rule ps us) do
+        return false
+      for pa in pargs, ta in args do
+        unless (← matchRewritePattern rule pa ta) do
+          return false
+      return true
+    let (ok, st) ← go.run init
+    unless ok do
+      continue
+    let some substs := st.args.mapM id | continue
+    let ls := st.lvls.toList.map (·.getD .zero)
+    unless st.checks.all fun (p, l) =>
+        levelParamsBound rule st.lvls p && p.instantiateParams rule.levelParams ls == l do
+      continue
+    modify fun s => { s with rewriteFires := s.rewriteFires + 1 }
+    if (← get).rewriteFires > 65536 then
+      throwError "rewrite rule budget exhausted: `{.ofConstName cand.thm}` would fire past 65536 firings"
+    let rhs := (rule.rhs.instantiateLevelParams rule.levelParams ls).instantiateRev substs
+    return some (mkAppN rhs (args.extract pargs.size args.size))
+  return none
+
+/--
+Fires rewrite rules at the head of `e` as long as one matches (`reduceRewriteStep?`). Iterating
+here keeps a cycle of rules from nesting `whnfCore` calls, so the firing budget stops it.
+-/
+partial def reduceRewrite? (e : Expr) : MetaM (Option Expr) := do
+  let some e' ← reduceRewriteStep? e | return none
+  let rec loop (e : Expr) : MetaM Expr := do
+    match (← reduceRewriteStep? e) with
+    | some e' => loop e'
+    | none => return e
+  return some (← loop e')
+
+/--
+Runs `x` counting rule firings from zero, unless an enclosing call already counts them.
+-/
+@[inline] def withRewriteFuel (x : MetaM α) : MetaM α := do
+  if (← read).rewriteFuelScope || !(← getEnv).hasRewriteRules then
+    x
+  else
+    modify fun s => { s with rewriteFires := 0 }
+    withReader (fun ctx => { ctx with rewriteFuelScope := true }) x
+
 /--
 Apply beta-reduction, zeta-reduction (i.e., unfold let local-decls), iota-reduction,
-expand let-expressions, expand assigned meta-variables, unfold aux declarations.
+expand let-expressions, expand assigned meta-variables, unfold aux declarations,
+and fire the active user rewrite rules.
 -/
 partial def whnfCore (e : Expr) : MetaM Expr :=
-  go e
+  withRewriteFuel (go e)
 where
   go (e : Expr) : MetaM Expr := do
     whnfEasyCases e fun e => do
       trace[Meta.whnf] e
       match e with
-      | .const ..  => pure e
+      | .const ..  =>
+        match (← reduceRewrite? e) with
+        | some e' => go e'
+        | none => pure e
       | .letE _ _ v b nondep =>
         let cfg ← getConfig
         if cfg.zeta && (!nondep || cfg.zetaHave) then
@@ -664,17 +798,24 @@ where
           | .notMatcher   =>
             let .const cname lvls := f'.getAppFn | return e
             let some cinfo := (← getEnv).find? cname | return e
+            -- user rewrite rules fire after ι-reduction and before δ-reduction, as in the kernel
+            let rewriteOr (e : Expr) : MetaM Expr := do
+              match (← reduceRewrite? e) with
+              | some e' => go e'
+              | none => return e
             match cinfo with
-            | .recInfo rec    => reduceRec rec lvls e.getAppArgs (fun _ => return e) (fun e => do recordUnfold cinfo.name; go e)
-            | .quotInfo rec   => reduceQuotRec rec e.getAppArgs (fun _ => return e) (fun e => do recordUnfold cinfo.name; go e)
+            | .recInfo rec    => reduceRec rec lvls e.getAppArgs (fun _ => rewriteOr e) (fun e => do recordUnfold cinfo.name; go e)
+            | .quotInfo rec   => reduceQuotRec rec e.getAppArgs (fun _ => rewriteOr e) (fun e => do recordUnfold cinfo.name; go e)
             | c@(.defnInfo _) => do
-              if (← isAuxDef c.name) then
+              if let some e' ← reduceRewrite? e then
+                go e'
+              else if (← isAuxDef c.name) then
                 recordUnfold c.name
                 deltaBetaDefinition c lvls e.getAppRevArgs (fun _ => return e) go
               else
                 return e
-            | .axiomInfo val => recordUnfoldAxiom val.name; return e
-            | _ => return e
+            | .axiomInfo val => recordUnfoldAxiom val.name; rewriteOr e
+            | _ => rewriteOr e
       | .proj _ i c =>
         let k (c : Expr) := do
           match (← projectCore? c i) with
@@ -1042,7 +1183,8 @@ def reduceNat? (e : Expr) : MetaM (Option Expr) :=
   if e.hasFVar || e.hasExprMVar || (← read).customCanUnfoldPredicate?.isSome then
     return false
   else
-    return true
+    -- The cache does not record the rule set a result was computed under.
+    return (← getActiveRewriteRules).isEmpty
 
 @[inline] private def cached? (useCache : Bool) (e : Expr) : MetaM (Option Expr) := do
   if useCache then
@@ -1059,7 +1201,7 @@ private def cache (useCache : Bool) (e r : Expr) : MetaM Expr := do
 set_option compiler.ignoreBorrowAnnotation true in
 @[export lean_whnf]
 partial def whnfImp (e : Expr) : MetaM Expr :=
-  withIncRecDepth <| whnfEasyCases e fun e => do
+  withIncRecDepth <| whnfEasyCases e fun e => withRewriteFuel do
     let useCache ← useWHNFCache e
     match (← cached? useCache e) with
     | some e' => pure e'

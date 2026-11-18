@@ -13,6 +13,7 @@ public import Lean.ReducibilityAttrs
 public import Lean.Util.MonadBacktrack
 public import Lean.Compiler.InlineAttrs
 public import Lean.Meta.TransparencyMode
+public import Lean.RewriteRules
 import Init.Data.Range.Polymorphic.Iterators
 import all Lean.Environment  -- for accessing `Environment.synthCacheRaw?`
 import all Lean.MetavarContext  -- for accessing `SynthNormMemoSlot.raw?`
@@ -617,6 +618,8 @@ structure State where
   /-- Array of postponed universe level constraints -/
   postponed        : PersistentArray PostponedEntry := {}
   diag             : Diagnostics := {}
+  /-- Rewrite rule firings since the outermost active `whnfCore` call. -/
+  rewriteFires     : Nat := 0
   deriving Inhabited
 
 /--
@@ -696,6 +699,14 @@ structure Context where
   metavariables
   -/
   cacheInferType : Bool := true
+  /--
+  The rewrite rules `whnfCore` fires, canonical, set by `isExprDefEq` from the explicit rules of the
+  scope and the rule sets of the constants in the problem. When `none`, the closure of the
+  explicit rules alone is used. See `getActiveRewriteRules`.
+  -/
+  rewriteSet? : Option (Array Name) := none
+  /-- Whether a `whnfCore` call that counts rule firings is active. -/
+  rewriteFuelScope : Bool := false
 deriving Inhabited
 
 def Context.config (c : Context) : Config := c.keyedConfig.config
@@ -853,7 +864,7 @@ section Methods
 variable [MonadControlT MetaM n] [Monad n]
 
 @[inline] def modifyCache (f : Cache → Cache) : MetaM Unit :=
-  modify fun { mctx, cache, zetaDeltaFVarIds, postponed, diag } => { mctx, cache := f cache, zetaDeltaFVarIds, postponed, diag }
+  modify fun { mctx, cache, zetaDeltaFVarIds, postponed, diag, rewriteFires } => { mctx, cache := f cache, zetaDeltaFVarIds, postponed, diag, rewriteFires }
 
 def resetCache : MetaM Unit :=
   modifyCache fun _ => {}
@@ -890,7 +901,7 @@ def resetSynthInstanceCache : MetaM Unit := do
 
 @[inline] def modifyDiag (f : Diagnostics → Diagnostics) : MetaM Unit := do
   if (← isDiagnosticsEnabled) then
-    modify fun { mctx, cache, zetaDeltaFVarIds, postponed, diag } => { mctx, cache, zetaDeltaFVarIds, postponed, diag := f diag }
+    modify fun { mctx, cache, zetaDeltaFVarIds, postponed, diag, rewriteFires } => { mctx, cache, zetaDeltaFVarIds, postponed, diag := f diag, rewriteFires }
 
 /-- If diagnostics are enabled, record that `declName` has been unfolded. -/
 def recordUnfold (declName : Name) : MetaM Unit := do
@@ -2683,9 +2694,37 @@ partial def processPostponed (mayPostpone : Bool := true) (exceptionOnFailure :=
 def isLevelDefEq (u v : Level) : MetaM Bool :=
   checkpointDefEq (mayPostpone := true) <| Meta.isLevelDefEqAux u v
 
+/--
+The rewrite rules Meta fires: the canonical rule set in `Context.rewriteSet?`, or the closure of
+the explicit rules of the scope. No rules fire during type class resolution, whose cache records
+no dependency on rule sets.
+-/
+def getActiveRewriteRules : MetaM (Array Name) := do
+  let env ← getEnv
+  if !env.hasRewriteRules || (← readThe Core.Context).isRecordingDeps then
+    return #[]
+  if let some s := (← read).rewriteSet? then
+    return s
+  return env.closeRewriteSet (getExplicitRewriteRules env) #[]
+
+/--
+The rule set the kernel would use for a declaration containing `t` and `s`: the explicit rules of
+the scope and of the enclosing problem, closed with the rule sets of the constants of `t` and `s`.
+-/
+private def mkRewriteSetFor? (t s : Expr) : MetaM (Option (Array Name)) := do
+  let env ← getEnv
+  if !env.hasRewriteRules || (← readThe Core.Context).isRecordingDeps then
+    return none
+  let outer := (← read).rewriteSet?.getD #[]
+  let consts := t.foldConsts (s.foldConsts #[] fun c cs => cs.push c) fun c cs => cs.push c
+  return some (env.closeRewriteSet (outer ++ getExplicitRewriteRules env) consts)
+
 /-- See `isDefEq`. -/
-def isExprDefEq (t s : Expr) : MetaM Bool :=
-  withReader (fun ctx => { ctx with defEqCtx? := some { lhs := t, rhs := s, lctx := ctx.lctx, localInstances := ctx.localInstances } }) do
+def isExprDefEq (t s : Expr) : MetaM Bool := do
+  let rewriteSet? ← mkRewriteSetFor? t s
+  withReader (fun ctx => { ctx with
+    defEqCtx? := some { lhs := t, rhs := s, lctx := ctx.lctx, localInstances := ctx.localInstances }
+    rewriteSet? := rewriteSet? <|> ctx.rewriteSet? }) do
     /-
     The following `resetDefEqPermCaches` is a workaround. Without it the test suite fails, and we probably cannot compile complex libraries such as Mathlib.
     TODO: investigate why we need this reset.

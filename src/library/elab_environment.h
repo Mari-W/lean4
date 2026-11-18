@@ -27,7 +27,7 @@ public:
     constant_info get(name const & n) const { return to_kernel_env().get(n); };
 
     /** \brief Extends the current environment with the given declaration */
-    elab_environment add(declaration const & d, bool check = true) const;
+    elab_environment add(declaration const & d, bool check = true, array_ref<name> const & rules = array_ref<name>()) const;
 
     /** \brief Pointer equality */
     friend bool is_eqp(elab_environment const & e1, elab_environment const & e2) {

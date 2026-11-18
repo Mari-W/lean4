@@ -29,6 +29,7 @@ public import Lean.ReservedNameAction
 public import Lean.InternalExceptionId
 public import Lean.Server
 public import Lean.ScopedEnvExtension
+public import Lean.RewriteRules
 public import Lean.DocString
 public import Lean.DeclarationRange
 public import Lean.LoadDynlib

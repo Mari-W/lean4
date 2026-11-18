@@ -16,4 +16,5 @@ add_library(
   quot.cpp
   inductive.cpp
   trace.cpp
+  rewrite_rules.cpp
 )

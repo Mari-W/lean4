@@ -156,6 +156,7 @@ class add_inductive_fn {
     environment            m_env;
     name_generator         m_ngen;
     diagnostics *          m_diag;
+    rewrite_rule_table     m_rules;
     local_ctx              m_lctx;
     names      m_lparams;
     unsigned               m_nparams;
@@ -190,8 +191,9 @@ class add_inductive_fn {
     buffer<rec_info>       m_rec_infos;
 
 public:
-    add_inductive_fn(environment const & env, diagnostics * diag, inductive_decl const & decl, unsigned nnested):
-        m_env(env), m_ngen(*g_ind_fresh), m_diag(diag), m_lparams(decl.get_lparams()), m_is_unsafe(decl.is_unsafe()),
+    add_inductive_fn(environment const & env, diagnostics * diag, inductive_decl const & decl, unsigned nnested,
+                     rewrite_rule_table const & rules):
+        m_env(env), m_ngen(*g_ind_fresh), m_diag(diag), m_rules(rules), m_lparams(decl.get_lparams()), m_is_unsafe(decl.is_unsafe()),
         m_nnested(nnested) {
         if (!decl.get_nparams().is_small())
             throw kernel_exception(env, "invalid inductive datatype, number of parameters is too big");
@@ -199,7 +201,7 @@ public:
         to_buffer(decl.get_types(), m_ind_types);
     }
 
-    type_checker tc() { return type_checker(m_env, m_lctx, m_diag, m_is_unsafe ? definition_safety::unsafe : definition_safety::safe); }
+    type_checker tc() { return type_checker(m_env, m_lctx, m_diag, m_is_unsafe ? definition_safety::unsafe : definition_safety::safe, m_rules); }
 
     /** Return type of the parameter at position `i` */
     expr get_param_type(unsigned i) const {
@@ -1220,7 +1222,7 @@ static void check_no_nested_aux(environment const & env, name const & n, expr co
     }
 }
 
-environment environment::add_inductive(declaration const & d) const {
+environment environment::add_inductive(declaration const & d, rewrite_rule_table const & rules) const {
     /* Reject metavariables, free variables, and references to auxiliary declarations. */
     {
         inductive_decl ind_d(d);
@@ -1237,7 +1239,7 @@ environment environment::add_inductive(declaration const & d) const {
     elim_nested_inductive_result res = elim_nested_inductive_fn(*this, d)();
     unsigned nnested = res.m_aux2nested.size();
     scoped_diagnostics diag(*this, true);
-    environment aux_env = add_inductive_fn(*this, diag.get(), inductive_decl(res.m_aux_decl), nnested)();
+    environment aux_env = add_inductive_fn(*this, diag.get(), inductive_decl(res.m_aux_decl), nnested, rules)();
     if (!nnested) {
         /* `d` did not contain nested inductive types. */
         return diag.update(aux_env);
@@ -1305,7 +1307,7 @@ environment environment::add_inductive(declaration const & d) const {
            otherwise escape type checking. We check them at the end, using `new_env`, to avoid
            type checking terms in an environment containing auxiliary declarations. */
         {
-            type_checker tc(new_env, res.m_params_lctx, diag.get(), inductive_decl(d).is_unsafe() ? definition_safety::unsafe : definition_safety::safe);
+            type_checker tc(new_env, res.m_params_lctx, diag.get(), inductive_decl(d).is_unsafe() ? definition_safety::unsafe : definition_safety::safe, rules);
             res.m_aux2nested.for_each([&](name const &, expr const & nested) {
                     tc.check(nested, inductive_decl(d).get_lparams());
                 });
@@ -1319,7 +1321,7 @@ environment environment::add_inductive(declaration const & d) const {
            checks in the nested inductive handling.
         */
         {
-            type_checker tc(new_env, diag.get(), inductive_decl(d).is_unsafe() ? definition_safety::unsafe : definition_safety::safe);
+            type_checker tc(new_env, diag.get(), inductive_decl(d).is_unsafe() ? definition_safety::unsafe : definition_safety::safe, rules);
             for (inductive_type const & ind_type : ind_d.get_types()) {
                 for (constructor const & cnstr : ind_type.get_cnstrs()) {
                     tc.check(new_env.get(constructor_name(cnstr)).get_type(), inductive_decl(d).get_lparams());

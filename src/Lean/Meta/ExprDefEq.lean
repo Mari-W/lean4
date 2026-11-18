@@ -2547,6 +2547,9 @@ partial def isExprDefEqAuxImpl (t : Expr) (s : Expr) : MetaM Bool := withIncRecD
     let t ← instantiateMVars t
     let s ← instantiateMVars s
     let numPostponed ← getNumPostponed
+    -- The caches do not record the rule set a result was computed under.
+    unless (← getActiveRewriteRules).isEmpty do
+      return ← isExprDefEqExpensive t s
     let k ← mkCacheKey t s
     match (← getCachedResult k) with
     | .true  =>

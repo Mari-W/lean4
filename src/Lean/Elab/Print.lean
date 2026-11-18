@@ -303,6 +303,17 @@ private def printAxiomsOf (constName : Name) : CommandElabM Unit := do
     cs.forM printAxiomsOf
   | _ => throwUnsupportedSyntax
 
+private def printRulesOf (constName : Name) : CommandElabM Unit := do
+  let rules := (← getEnv).kernelRewriteSet constName
+  if rules.isEmpty then
+    logInfo m!"'{constName}' is checked under no rewrite rules"
+  else
+    logInfo m!"'{constName}' is checked under rewrite rules: {rules.map MessageData.ofConstName |>.toList}"
+
+@[builtin_command_elab «printRules»] def elabPrintRules : CommandElab := fun stx => do
+  let cs ← liftCoreM <| realizeGlobalConstWithInfos stx[2]
+  cs.forM printRulesOf
+
 private def printEqnsOf (constName : Name) : CommandElabM Unit := do
   let some eqns ← liftTermElabM <| Meta.getEqnsFor? constName |
     logInfo m!"'{constName}' does not have equations"

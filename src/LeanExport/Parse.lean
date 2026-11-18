@@ -27,6 +27,8 @@ namespace LeanExport
 public structure ExportedEnv where
   constMap : Std.HashMap Lean.Name Lean.ConstantInfo
   constOrder : Array Lean.Name
+  /-- The `rewrite` lines: rule theorem, head constant and priority, in order. -/
+  rewrites : Array (Lean.Name × Lean.Name × Nat) := #[]
   deriving Inhabited
 
 namespace Parse
@@ -42,6 +44,7 @@ structure State where
   recursorRuleMap : Std.HashMap Nat Lean.RecursorRule := {}
   constMap : Std.HashMap Lean.Name Lean.ConstantInfo := {}
   constOrder : Array Lean.Name := #[]
+  rewrites : Array (Lean.Name × Lean.Name × Nat) := #[]
 
 abbrev M := StateT State <| IO
 
@@ -270,6 +273,16 @@ def parseAxiomInfo (data : Std.TreeMap.Raw String Json) : M Unit := do
 
   addConst name <| .axiomInfo { name, levelParams, type, isUnsafe }
 
+def parseRewrite (data : Std.TreeMap.Raw String Json) : M Unit := do
+  let some (.num (nameIdx : Nat)) := data["name"]? | fail s!"rewrite invalid"
+  let some (.num (headIdx : Nat)) := data["head"]? | fail s!"rewrite invalid"
+  let some (.num (prio : Nat)) := data["prio"]? | fail s!"rewrite invalid"
+  let name ← getName nameIdx
+  let head ← getName headIdx
+  unless (← get).constMap.contains name do
+    fail s!"rewrite rule {name} before its theorem"
+  modify fun s => { s with rewrites := s.rewrites.push (name, head, prio) }
+
 def parseDefnInfo (data : Std.TreeMap.Raw String Json) : M Unit := do
   let some (.num (nameIdx : Nat)) := data["name"]? | fail s!"defnInfo invalid"
   let some (.arr levelParamsIdxs) := data["levelParams"]? | fail s!"defnInfo invalid"
@@ -497,6 +510,7 @@ def parseItem (line : String) : M Unit := do
   | [("opaque", .obj data)] => parseOpaqueInfo data
   | [("quot", .obj data)] => parseQuotInfo data
   | [("inductive", .obj data)] => parseInductive data
+  | [("rewrite", .obj data)] => parseRewrite data
   | _ => fail s!"Unknown export object with keys {obj.keys}"
 
 partial def parseItems : M Unit :=
@@ -519,10 +533,11 @@ end Parse
 
 public def parseStream (stream : IO.FS.Stream) : IO ExportedEnv := do
   let (_, state) ← Parse.M.run Parse.parseFile stream
-  let { constMap, constOrder, .. } := state
+  let { constMap, constOrder, rewrites, .. } := state
   return {
     constMap,
     constOrder,
+    rewrites,
   }
 
 -- We cannot turn pure Strings into Streams?

@@ -104,6 +104,28 @@ opaque EnvExtensionEntrySpec : NonemptyType.{0}
 @[expose] def EnvExtensionEntry : Type := EnvExtensionEntrySpec.type
 instance : Nonempty EnvExtensionEntry := EnvExtensionEntrySpec.property
 
+/--
+A user rewrite rule: the theorem `thm : ∀ xs, l = r`, the head constant `head` of `l`, and the
+priority `prio`. The rules of a head fire in order of priority, highest first, then by `Name.cmp`.
+-/
+structure RewriteRule where
+  thm  : Name
+  head : Name
+  prio : Nat
+  deriving Inhabited, BEq, Repr
+
+/-- The rewrite rules and rule sets of a module, as stored in its `.olean` file. -/
+structure ModuleRewrite where
+  /-- Rules registered in this module, in registration order. -/
+  rules   : Array RewriteRule := #[]
+  /-- Interned closed rule sets, each canonical and nonempty. -/
+  sets    : Array (Array Name) := #[]
+  /-- Indices into `ModuleData.constants` of the constants with a nonempty rule set, increasing. -/
+  declIdx : Array Nat := #[]
+  /-- For each entry of `declIdx`, the index of its rule set in `sets`. -/
+  declSet : Array Nat := #[]
+  deriving Inhabited
+
 /-- Content of a .olean file.
    We use `compact.cpp` to generate the image of this object in disk. -/
 structure ModuleData where
@@ -125,6 +147,8 @@ structure ModuleData where
   -/
   extraConstNames : Array Name
   entries         : Array (Name × Array EnvExtensionEntry)
+  /-- User rewrite rules registered in the module and the rule sets of its constants. -/
+  rewrites        : ModuleRewrite := {}
   deriving Inhabited
 
 /-- Import including information resulting from processing of the entire import DAG. -/
@@ -190,6 +214,25 @@ structure Diagnostics where
   deriving Inhabited
 
 /--
+The user rewrite rules known to the kernel and the rule set `R(D)` each declaration was checked
+under. A declaration with an empty rule set has no entry in `sets`.
+-/
+structure Rewrites where
+  /-- Every registered rule, keyed by its theorem. -/
+  rules    : SMap Name RewriteRule := {}
+  /-- The registered rules of each head constant, for the elaborator's lookup. -/
+  byHead   : SMap Name (Array Name) := {}
+  /-- The closed, canonical rule set `R(D)` of each declaration whose set is nonempty. -/
+  sets     : SMap Name (Array Name) := {}
+  /-- Rules registered since the import, in registration order. -/
+  newRules : Array RewriteRule := #[]
+  deriving Inhabited
+
+/-- Sorts a rule set by `Name.cmp` and removes duplicates. -/
+def canonRewriteSet (s : Array Name) : Array Name :=
+  (s.qsort (fun a b => a.cmp b == .lt)).eraseReps
+
+/--
 An environment stores declarations provided by the user. The kernel
 currently supports different kinds of declarations such as definitions, theorems,
 and inductive families. Each has a unique identifier (i.e., `Name`), and can be
@@ -230,6 +273,8 @@ structure Environment where
   statistics. We claim this is ok since these methods are mainly used for debugging.
   -/
   diagnostics : Diagnostics := {}
+  /-- User rewrite rules and the rule sets of declarations. -/
+  rewrites    : Rewrites := {}
   /--
   Mapping from constant name to module (index) where constant has been declared.
   Recall that a Lean file has a header where previously compiled modules can be imported.
@@ -305,10 +350,14 @@ private def markQuotInit (env : Environment) : Environment :=
 private def isQuotInit (env : Environment) : Bool :=
   env.quotInit
 
-/-- Type check given declaration and add it to the environment -/
+/--
+Type check given declaration and add it to the environment. The declaration is checked under the
+rule set closed from the explicit rewrite rules `rules`, which is stored with it.
+-/
 @[extern "lean_add_decl"]
 opaque addDeclCore (env : Environment) (maxHeartbeats : USize) (maxRecDepth : USize)
-  (decl : @& Declaration) (cancelTk? : @& Option IO.CancelToken) : Except Exception Environment
+  (decl : @& Declaration) (cancelTk? : @& Option IO.CancelToken) (rules : @& Array Name := #[]) :
+  Except Exception Environment
 
 /--
 Add declaration to kernel without type checking it.
@@ -318,7 +367,65 @@ It compromises soundness because, for example, a buggy tactic may produce an inv
 and the kernel will not catch it if the new option is set to true.
 -/
 @[extern "lean_add_decl_without_checking"]
-opaque addDeclWithoutChecking (env : Environment) (decl : @& Declaration) : Except Exception Environment
+opaque addDeclWithoutChecking (env : Environment) (decl : @& Declaration) (rules : @& Array Name := #[]) :
+  Except Exception Environment
+
+/--
+Registers the stored theorem `thm : ∀ xs, l = r` as a rewrite rule. The kernel checks that `l` is a
+constant outside the basis (`Nat`, `Eq`, `False`, `Quot`) applied to first-order linear patterns
+that bind every variable of `xs`, and that the level parameters of `r` occur in `l`.
+-/
+@[extern "lean_add_rewrite_rule"]
+opaque addRewriteRule (env : Environment) (thm : @& Name) (prio : @& Nat := 1000) : Except Exception Environment
+
+@[export lean_kernel_has_rewrite_rules]
+def hasRewriteRules (env : Environment) : Bool :=
+  !(env.rewrites.rules.map₁.isEmpty && env.rewrites.rules.map₂.isEmpty)
+
+/-- The registered rewrite rule `thm`, if any. -/
+def rewriteRule? (env : Environment) (thm : Name) : Option RewriteRule :=
+  env.rewrites.rules.find? thm
+
+/-- The head constant of the rewrite rule `thm`, if `thm` is a registered rule. -/
+@[export lean_kernel_rewrite_head]
+def rewriteHead? (env : Environment) (thm : Name) : Option Name :=
+  env.rewriteRule? thm |>.map (·.head)
+
+/-- The registered rules with head constant `head`, in registration order. -/
+def rewriteRulesFor (env : Environment) (head : Name) : Array Name :=
+  env.rewrites.byHead.findD head #[]
+
+/-- The priority of the registered rewrite rule `thm`, `0` if `thm` is none. -/
+@[export lean_kernel_rewrite_prio]
+def rewritePrio (env : Environment) (thm : Name) : Nat :=
+  env.rewriteRule? thm |>.map (·.prio) |>.getD 0
+
+/-- The rule set `R(n)` the declaration `n` was checked under. -/
+@[export lean_kernel_rewrite_set]
+def rewriteSet (env : Environment) (n : Name) : Array Name :=
+  env.rewrites.sets.findD n #[]
+
+/-- `canon(E ∪ ⋃_{h ∈ E} R(h) ∪ ⋃_{c ∈ consts} R(c))` for the explicit rules `E`. -/
+@[export lean_kernel_close_rewrite_set]
+def closeRewriteSet (env : Environment) (explicitRules consts : Array Name) : Array Name := Id.run do
+  let mut s := #[]
+  for h in explicitRules do
+    s := s.push h ++ env.rewriteSet h
+  for c in consts do
+    s := s ++ env.rewriteSet c
+  return canonRewriteSet s
+
+@[export lean_kernel_set_rewrite_set]
+private def setRewriteSet (env : Environment) (n : Name) (set : Array Name) : Environment :=
+  if set.isEmpty then env else { env with rewrites.sets := env.rewrites.sets.insert n set }
+
+@[export lean_kernel_register_rewrite]
+private def registerRewrite (env : Environment) (thm head : Name) (prio : Nat) : Environment :=
+  let rule := { thm, head, prio }
+  { env with rewrites := { env.rewrites with
+      rules    := env.rewrites.rules.insert thm rule
+      byHead   := env.rewrites.byHead.insert head (env.rewriteRulesFor head |>.push thm)
+      newRules := env.rewrites.newRules.push rule } }
 
 @[export lean_environment_add]
 private def add (env : Environment) (cinfo : ConstantInfo) : Environment :=
@@ -826,10 +933,11 @@ def unlockAsync (env : Environment) : Environment :=
 
 @[extern "lean_elab_add_decl"]
 private opaque addDeclCheck (env : Environment) (maxHeartbeats : USize) (maxRecDepth : USize)
-  (decl : @& Declaration) (cancelTk? : @& Option IO.CancelToken) : Except Kernel.Exception Environment
+  (decl : @& Declaration) (cancelTk? : @& Option IO.CancelToken) (rules : @& Array Name) :
+  Except Kernel.Exception Environment
 
 @[extern "lean_elab_add_decl_without_checking"]
-private opaque addDeclWithoutChecking (env : Environment) (decl : @& Declaration) :
+private opaque addDeclWithoutChecking (env : Environment) (decl : @& Declaration) (rules : @& Array Name) :
   Except Kernel.Exception Environment
 
 /--
@@ -839,16 +947,17 @@ This is a plumbing function for the implementation of `Lean.addDecl`, most users
 instead.
 -/
 def addDeclCore (env : Environment) (maxHeartbeats : USize) (maxRecDepth : USize)
-    (decl : @& Declaration) (cancelTk? : @& Option IO.CancelToken) (doCheck := true) :
+    (decl : @& Declaration) (cancelTk? : @& Option IO.CancelToken) (doCheck := true)
+    (rules : Array Name := #[]) :
     Except Kernel.Exception Environment := do
   if let some ctx := env.asyncCtx? then
     if let some n := decl.getTopLevelNames.find? (!ctx.mayContain ·) then
       throw <| .other s!"cannot add declaration {n} to environment as it is restricted to the \
         prefix {ctx.declPrefix}"
   let mut env ← if doCheck then
-    addDeclCheck env maxHeartbeats maxRecDepth decl cancelTk?
+    addDeclCheck env maxHeartbeats maxRecDepth decl cancelTk? rules
   else
-    addDeclWithoutChecking env decl
+    addDeclWithoutChecking env decl rules
 
   -- Let the elaborator know about the new constants. This uses the same constant for both
   -- visibility scopes but the caller can still customize the public one on the main elaboration
@@ -874,6 +983,57 @@ def addDeclCore (env : Environment) (maxHeartbeats : USize) (maxRecDepth : USize
 @[inherit_doc Kernel.Environment.constants]
 def constants (env : Environment) : ConstMap :=
   env.toKernelEnv.constants
+
+/-!
+Rewrite rules as seen by the elaborator. These read the eagerly available kernel environment
+`base.private`, which holds the imported rule sets, every registered rule, and the rule sets that
+`recordRewriteSet` recorded on this branch. The kernel's own copy is in `checked`.
+-/
+
+@[inherit_doc Kernel.Environment.hasRewriteRules]
+def hasRewriteRules (env : Environment) : Bool :=
+  env.base.private.hasRewriteRules
+
+@[inherit_doc Kernel.Environment.rewriteRule?]
+def rewriteRule? (env : Environment) (thm : Name) : Option RewriteRule :=
+  env.base.private.rewriteRule? thm
+
+@[inherit_doc Kernel.Environment.rewriteHead?]
+def rewriteHead? (env : Environment) (thm : Name) : Option Name :=
+  env.base.private.rewriteHead? thm
+
+@[inherit_doc Kernel.Environment.rewriteRulesFor]
+def rewriteRulesFor (env : Environment) (head : Name) : Array Name :=
+  env.base.private.rewriteRulesFor head
+
+@[inherit_doc Kernel.Environment.rewriteSet]
+def rewriteSet (env : Environment) (n : Name) : Array Name :=
+  env.base.private.rewriteSet n
+
+@[inherit_doc Kernel.Environment.closeRewriteSet]
+def closeRewriteSet (env : Environment) (explicitRules consts : Array Name) : Array Name :=
+  env.base.private.closeRewriteSet explicitRules consts
+
+/-- Records the rule set of `n` for the elaborator, ahead of the kernel. -/
+def recordRewriteSet (env : Environment) (n : Name) (set : Array Name) : Environment :=
+  if set.isEmpty then env else
+    { env with base.private := { env.base.private with
+        rewrites.sets := env.base.private.rewrites.sets.insert n set } }
+
+/-- The kernel's rule set `R(n)`, waiting for all prior declarations to be checked. -/
+def kernelRewriteSet (env : Environment) (n : Name) : Array Name :=
+  env.toKernelEnv.rewriteSet n
+
+/--
+Registers the theorem `thm` as a rewrite rule, see `Kernel.Environment.addRewriteRule`. Waits for
+all prior declarations to be checked.
+-/
+def addRewriteRule (env : Environment) (thm : Name) (prio : Nat := 1000) :
+    Except Kernel.Exception Environment := do
+  let kenv ← env.toKernelEnv.addRewriteRule thm prio
+  let some rule := kenv.rewriteRule? thm
+    | throw <| .other s!"rewrite rule '{thm}' was not registered"
+  return env.modifyCheckedAsync (·.registerRewrite thm rule.head rule.prio)
 
 @[inherit_doc Kernel.Environment.const2ModIdx]
 def const2ModIdx (env : Environment) : Std.HashMap Name ModuleIdx :=
@@ -2122,6 +2282,16 @@ def saveModuleDataParts (mod : Name) (parts : Array (System.FilePath × ModuleDa
     let (fname, data) := parts[i]
     cs := some (← unsafe CompactedRegion.save fname mod data #[] cs)
 
+/-- Gives a `ModuleData` read from an `.olean` written without rewrite rules an empty `rewrites`. -/
+@[extern "lean_module_data_with_rewrites"]
+private opaque ModuleData.withRewrites (d : ModuleData) (empty : ModuleRewrite) : ModuleData
+
+/-- Reads one `.olean` part as `ModuleData`, see `ModuleData.withRewrites`. -/
+private def readModuleDataPart (fname : System.FilePath) (deps : Array CompactedRegion) :
+    IO (ModuleData × CompactedRegion) := do
+  let (d, region) ← unsafe CompactedRegion.read (α := ModuleData) fname deps
+  return (d.withRewrites {}, region)
+
 /--
 Loads the module data from the given file names. The files must be (a prefix of) the result of a
 `saveModuleDataParts` call.
@@ -2131,7 +2301,7 @@ def readModuleDataParts (fnames : Array System.FilePath) :
   let mut depRegions : Array CompactedRegion := #[]
   let mut result : Array (ModuleData × CompactedRegion) := #[]
   for fname in fnames do
-    let part ← unsafe CompactedRegion.read (α := ModuleData) fname depRegions
+    let part ← readModuleDataPart fname depRegions
     result := result.push part
     depRegions := depRegions.push part.2
   return result
@@ -2140,7 +2310,7 @@ def saveModuleData (fname : System.FilePath) (mod : Name) (data : ModuleData) : 
   let _ ← unsafe CompactedRegion.save fname mod data #[] none
 
 def readModuleData (fname : @& System.FilePath) : IO (ModuleData × CompactedRegion) :=
-  unsafe CompactedRegion.read fname #[]
+  readModuleDataPart fname #[]
 
 /--
   Free compacted regions of imports. No live references to imported objects may exist at the time of invocation; in
@@ -2198,6 +2368,20 @@ private def computeExtEntries (env : Environment) :
     «private» := filterNonEmpty .private
   }
 
+/-- The rules registered in this module and the interned rule sets of `constNames`. -/
+private def mkModuleRewrite (kenv : Kernel.Environment) (constNames : Array Name) : ModuleRewrite := Id.run do
+  let mut out : ModuleRewrite := { rules := kenv.rewrites.newRules }
+  let mut ids : Std.HashMap (Array Name) Nat := {}
+  for h : i in [0:constNames.size] do
+    let set := kenv.rewriteSet constNames[i]
+    unless set.isEmpty do
+      let k := ids.getD set out.sets.size
+      if k == out.sets.size then
+        ids := ids.insert set k
+        out := { out with sets := out.sets.push set }
+      out := { out with declIdx := out.declIdx.push i, declSet := out.declSet.push k }
+  return out
+
 def mkModuleData (env : Environment) (level : OLeanLevel := .private)
     (extEntries? : Option (OLeanEntries (Array (Name × Array EnvExtensionEntry))) := none) :
     IO ModuleData := do
@@ -2224,6 +2408,7 @@ def mkModuleData (env : Environment) (level : OLeanLevel := .private)
   return { env.header with
     extraConstNames := getIRExtraConstNames env level
     constNames, constants, entries
+    rewrites := mkModuleRewrite kenv constNames
   }
 
 set_option compiler.ignoreBorrowAnnotation true in
@@ -2444,15 +2629,15 @@ private def readModuleDataPartsOfMod (mod : Name) : IO (Array (ModuleData × Com
   let mFile ← findOLean mod
   unless (← mFile.pathExists) do
     throw <| IO.userError s!"object file '{mFile}' of module {mod} does not exist"
-  let main ← unsafe CompactedRegion.read (α := ModuleData) mFile #[]
+  let main ← readModuleDataPart mFile #[]
   if !main.1.isModule then
     return #[main]
   -- Opportunistically load all available parts.
   -- Necessary because the import level may be upgraded a later import.
   let sFile := OLeanLevel.server.adjustFileName mFile
-  let server ← unsafe CompactedRegion.read (α := ModuleData) sFile #[main.2]
+  let server ← readModuleDataPart sFile #[main.2]
   let pFile := OLeanLevel.private.adjustFileName mFile
-  let priv ← unsafe CompactedRegion.read (α := ModuleData) pFile #[main.2, server.2]
+  let priv ← readModuleDataPart pFile #[main.2, server.2]
   return #[main, server, priv]
 
 private def readIRPartsOfMod (mod : Name) : IO (Array (ModuleData × CompactedRegion)) := do
@@ -2462,11 +2647,11 @@ private def readIRPartsOfMod (mod : Name) : IO (Array (ModuleData × CompactedRe
   -- checks are not great in the face of module-ness changes
   unless (← irSigFile.pathExists) do
     return #[]
-  let irSig ← unsafe CompactedRegion.read (α := ModuleData) irSigFile #[]
+  let irSig ← readModuleDataPart irSigFile #[]
   -- Opportunistically load all available parts.
   -- Necessary because the import level may be upgraded a later import.
   let irFile := mFile.withExtension "ir"
-  let ir ← unsafe CompactedRegion.read (α := ModuleData) irFile #[irSig.2]
+  let ir ← readModuleDataPart irFile #[irSig.2]
   return #[irSig, ir]
 
 partial def importModulesCore
@@ -2664,6 +2849,29 @@ where
       p := body
     p.isProp
 
+/-- Merges the rules and rule sets of imported modules, interning equal sets. -/
+def Kernel.Rewrites.ofModuleData (mods : Array ModuleData) : Kernel.Rewrites := Id.run do
+  let mut rules : Std.HashMap Name RewriteRule := {}
+  let mut byHead : Std.HashMap Name (Array Name) := {}
+  let mut sets : Std.HashMap Name (Array Name) := {}
+  let mut interned : Std.HashMap (Array Name) (Array Name) := {}
+  for data in mods do
+    for r in data.rewrites.rules do
+      unless rules.contains r.thm do
+        rules := rules.insert r.thm r
+        byHead := byHead.insert r.head ((byHead.getD r.head #[]).push r.thm)
+    for i in data.rewrites.declIdx, k in data.rewrites.declSet do
+      let some n := data.constNames[i]? | continue
+      let some set := data.rewrites.sets[k]? | continue
+      let set := interned.getD set set
+      interned := interned.insert set set
+      sets := sets.insert n set
+  return {
+    rules  := SMap.fromHashMap rules false
+    byHead := SMap.fromHashMap byHead false
+    sets   := SMap.fromHashMap sets false
+  }
+
 /--
 Constructs environment from `importModulesCore` results.
 
@@ -2727,6 +2935,7 @@ def finalizeImport (s : ImportState) (imports : Array Import) (opts : Options) (
   let privateConstants : ConstMap := SMap.fromHashMap privateConstantMap false
   let privateBase : Kernel.Environment := {
     const2ModIdx, constants := privateConstants
+    rewrites        := Kernel.Rewrites.ofModuleData moduleData
     quotInit        := !imports.isEmpty -- We assume `Init.Prelude` initializes quotient module
     extensions      := exts
     irBaseExts      := exts
@@ -3161,7 +3370,8 @@ namespace Kernel
 -- We use `Lean.Environment` for ease of use; as this is a debugging function, we forgo a
 -- `Kernel.Environment` base variant
 @[extern "lean_kernel_is_def_eq"]
-opaque isDefEq (env : Lean.Environment) (lctx : LocalContext) (a b : Expr) : Except Kernel.Exception Bool
+opaque isDefEq (env : Lean.Environment) (lctx : LocalContext) (a b : Expr) (rules : @& Array Name := #[]) :
+  Except Kernel.Exception Bool
 
 def isDefEqGuarded (env : Lean.Environment) (lctx : LocalContext) (a b : Expr) : Bool :=
   if let .ok result := isDefEq env lctx a b then result else false
@@ -3173,7 +3383,8 @@ def isDefEqGuarded (env : Lean.Environment) (lctx : LocalContext) (a b : Expr) :
 -- We use `Lean.Environment` for ease of use; as this is a debugging function, we forgo a
 -- `Kernel.Environment` base variant
 @[extern "lean_kernel_whnf"]
-opaque whnf (env : Lean.Environment) (lctx : LocalContext) (a : Expr) : Except Kernel.Exception Expr
+opaque whnf (env : Lean.Environment) (lctx : LocalContext) (a : Expr) (rules : @& Array Name := #[]) :
+  Except Kernel.Exception Expr
 
 /--
   Kernel typecheck function. We use it mainly for debugging purposes.
@@ -3182,7 +3393,8 @@ opaque whnf (env : Lean.Environment) (lctx : LocalContext) (a : Expr) : Except K
 -- We use `Lean.Environment` for ease of use; as this is a debugging function, we forgo a
 -- `Kernel.Environment` base variant
 @[extern "lean_kernel_check"]
-opaque check (env : Lean.Environment) (lctx : LocalContext) (a : Expr) : Except Kernel.Exception Expr
+opaque check (env : Lean.Environment) (lctx : LocalContext) (a : Expr) (rules : @& Array Name := #[]) :
+  Except Kernel.Exception Expr
 
 end Kernel
 

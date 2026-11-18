@@ -384,6 +384,182 @@ bool type_checker::is_prop(expr const & e) {
     return normalizes_to_zero(sort_level(s));
 }
 
+/* Resets the rule firing counter at the outermost `whnf`/`whnf_core` call. */
+class rewrite_fuel_scope {
+    type_checker & m_tc;
+public:
+    rewrite_fuel_scope(type_checker & tc):m_tc(tc) {
+        if (m_tc.m_rewrite_depth++ == 0)
+            m_tc.m_rewrite_fires = 0;
+    }
+    ~rewrite_fuel_scope() { m_tc.m_rewrite_depth--; }
+};
+
+bool type_checker::match_rewrite_levels(rewrite_rule const & rule, levels const & ps, levels const & ls,
+                                        buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks) {
+    if (length(ps) != length(ls))
+        return false;
+    levels it = ls;
+    for (level const & p : ps) {
+        level const & l = head(it);
+        it = tail(it);
+        if (is_param(p)) {
+            unsigned i = 0;
+            for (name const & q : rule.m_lparams) {
+                if (q == param_id(p))
+                    break;
+                i++;
+            }
+            if (lsubst[i]) {
+                if (*lsubst[i] != l)
+                    return false;
+            } else {
+                lsubst[i] = l;
+            }
+        } else {
+            lchecks.push_back(mk_pair(p, l));
+        }
+    }
+    return true;
+}
+
+/* Match the constant application `p` against `t` syntactically. */
+bool type_checker::match_rewrite_app(rewrite_rule const & rule, expr const & p, expr const & t, buffer<expr> & subst,
+                                     buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks) {
+    expr const & pf = get_app_fn(p);
+    expr const & tf = get_app_fn(t);
+    if (!is_constant(tf) || const_name(pf) != const_name(tf))
+        return false;
+    buffer<expr> pargs, targs;
+    get_app_args(p, pargs);
+    get_app_args(t, targs);
+    if (pargs.size() != targs.size())
+        return false;
+    if (!match_rewrite_levels(rule, const_levels(pf), const_levels(tf), lsubst, lchecks))
+        return false;
+    for (unsigned i = 0; i < pargs.size(); i++) {
+        if (!match_rewrite_pattern(rule, pargs[i], targs[i], subst, lsubst, lchecks))
+            return false;
+    }
+    return true;
+}
+
+/* Match the pattern `p` against `t`. A failed syntactic match of a constant pattern is retried once
+   on the weak head normal form of `t`, with literals turned into constructor applications. */
+bool type_checker::match_rewrite_pattern(rewrite_rule const & rule, expr const & p, expr const & t, buffer<expr> & subst,
+                                         buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks) {
+    if (is_bvar(p)) {
+        subst[rule.m_nvars - 1 - bvar_idx(p).get_small_value()] = t;
+        return true;
+    }
+    buffer<optional<level>> lsubst0(lsubst);
+    unsigned nchecks0 = lchecks.size();
+    if (match_rewrite_app(rule, p, t, subst, lsubst, lchecks))
+        return true;
+    lsubst = lsubst0;
+    lchecks.shrink(nchecks0);
+    expr t2 = whnf(t);
+    if (is_nat_lit(t2))
+        t2 = nat_lit_to_constructor(t2);
+    else if (is_string_lit(t2))
+        t2 = string_lit_to_constructor(t2);
+    if (is_eqp(t2, t))
+        return false;
+    return match_rewrite_app(rule, p, t2, subst, lsubst, lchecks);
+}
+
+/* Fire rules at the head of `e` as long as one matches. Iterating here keeps a cycle of rules from
+   nesting `whnf_core` calls, so the firing budget rather than the recursion limit stops it. */
+optional<expr> type_checker::reduce_rewrite(expr const & e) {
+    optional<expr> r = reduce_rewrite_step(e);
+    if (!r)
+        return r;
+    while (optional<expr> r2 = reduce_rewrite_step(*r))
+        r = r2;
+    return r;
+}
+
+/* `LEAN_REWRITE_CHECK_ARGS=1` makes every firing type-check the matched arguments against the
+   rule's binder types, as con-leche does. Without it the matcher trusts the redex. */
+static bool rewrite_check_args() {
+    static bool const on = [] {
+        char const * s = getenv("LEAN_REWRITE_CHECK_ARGS");
+        return s != nullptr && s[0] == '1';
+    }();
+    return on;
+}
+
+void type_checker::check_rewrite_args(rewrite_rule const & rule, levels const & us, buffer<expr> const & subst) {
+    expr t = instantiate_lparams(env().get(rule.m_thm).get_type(), rule.m_lparams, us);
+    for (unsigned i = 0; i < rule.m_nvars; i++) {
+        expr dom = instantiate_rev(binding_domain(t), i, subst.data());
+        if (!is_def_eq(infer_type_core(subst[i], false), dom))
+            throw kernel_exception(env(), sstream() << "rewrite rule '" << rule.m_thm
+                                   << "' matched an argument of the wrong type at binder " << i);
+        t = binding_body(t);
+    }
+}
+
+/* Fire the first rule of `m_rules` whose left-hand side matches a prefix of the application `e`. */
+optional<expr> type_checker::reduce_rewrite_step(expr const & e) {
+    if (m_rules.empty())
+        return none_expr();
+    expr const & f = get_app_fn(e);
+    if (!is_constant(f))
+        return none_expr();
+    std::vector<rewrite_rule> const * rules = m_rules.find(const_name(f));
+    if (!rules)
+        return none_expr();
+    buffer<expr> args;
+    get_app_args(e, args);
+    for (rewrite_rule const & rule : *rules) {
+        if (args.size() < rule.m_nargs)
+            continue;
+        buffer<expr> subst;
+        subst.resize(rule.m_nvars, expr());
+        buffer<optional<level>> lsubst;
+        lsubst.resize(length(rule.m_lparams), optional<level>());
+        buffer<std::pair<level, level>> lchecks;
+        buffer<expr> pargs;
+        expr const & pf = get_app_args(rule.m_lhs, pargs);
+        if (!match_rewrite_levels(rule, const_levels(pf), const_levels(f), lsubst, lchecks))
+            continue;
+        bool ok = true;
+        for (unsigned i = 0; ok && i < rule.m_nargs; i++)
+            ok = match_rewrite_pattern(rule, pargs[i], args[i], subst, lsubst, lchecks);
+        if (!ok)
+            continue;
+        buffer<level> ls;
+        buffer<name> bound;
+        unsigned i = 0;
+        for (name const & q : rule.m_lparams) {
+            ls.push_back(lsubst[i] ? *lsubst[i] : mk_level_zero());
+            if (lsubst[i])
+                bound.push_back(q);
+            i++;
+        }
+        levels us(ls);
+        names bound_ps(bound);
+        /* a level pattern over a parameter that no `.param` position binds never matches */
+        for (auto const & c : lchecks) {
+            if (get_undef_param(c.first, bound_ps) || instantiate(c.first, rule.m_lparams, us) != c.second) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok)
+            continue;
+        if (rewrite_check_args())
+            check_rewrite_args(rule, us, subst);
+        if (++m_rewrite_fires > LEAN_REWRITE_FIRE_BUDGET)
+            throw kernel_exception(env(), sstream() << "rewrite rule budget exhausted: '" << rule.m_thm
+                                   << "' would fire past " << LEAN_REWRITE_FIRE_BUDGET << " firings");
+        expr r = instantiate_rev(instantiate_lparams(rule.m_rhs, rule.m_lparams, us), subst.size(), subst.data());
+        return some_expr(mk_app(r, args.size() - rule.m_nargs, args.data() + rule.m_nargs));
+    }
+    return none_expr();
+}
+
 /** \brief Apply normalizer extensions to \c e.
     If `cheap == true`, then we don't perform delta-reduction when reducing major premise. */
 optional<expr> type_checker::reduce_recursor(expr const & e, bool cheap_rec, bool cheap_proj) {
@@ -397,6 +573,9 @@ optional<expr> type_checker::reduce_recursor(expr const & e, bool cheap_rec, boo
                                                 [&](expr const & e) { return infer(e); },
                                                 [&](expr const & e1, expr const & e2) { return is_def_eq(e1, e2); },
                                                 [&](expr const & e) { return is_prop(e); })) {
+        return r;
+    }
+    if (optional<expr> r = reduce_rewrite(e)) {
         return r;
     }
     return none_expr();
@@ -463,13 +642,21 @@ static bool is_let_fvar(local_ctx const & lctx, expr const & e) {
     We also do not cache results. */
 expr type_checker::whnf_core(expr const & e, bool cheap_rec, bool cheap_proj) {
     scope_rec_depth guard;
+    rewrite_fuel_scope fuel(*this);
     check_system("type checker: whnf", /* do_check_interrupted */ true);
 
     // handle easy cases
     switch (e.kind()) {
     case expr_kind::BVar: case expr_kind::Sort:  case expr_kind::MVar:
-    case expr_kind::Pi:   case expr_kind::Const: case expr_kind::Lambda:
+    case expr_kind::Pi:   case expr_kind::Lambda:
     case expr_kind::Lit:
+        return e;
+    case expr_kind::Const:
+        /* a rule whose left-hand side is a bare constant */
+        if (!m_rules.has_head(const_name(e)))
+            return e;
+        if (auto r = reduce_rewrite(e))
+            return whnf_core(*r, cheap_rec, cheap_proj);
         return e;
     case expr_kind::MData:
         return whnf_core(mdata_expr(e), cheap_rec, cheap_proj);
@@ -722,6 +909,7 @@ expr type_checker::whnf(expr const & e) {
     if (it != m_st->m_whnf.end())
         return it->second;
 
+    rewrite_fuel_scope fuel(*this);
     expr t = e;
     while (true) {
         expr t1 = whnf_core(t);
@@ -1209,9 +1397,10 @@ bool type_checker::is_def_eq(expr const & t, expr const & s) {
     return r;
 }
 
-type_checker::type_checker(environment const & env, local_ctx const & lctx, diagnostics * diag, definition_safety ds):
+type_checker::type_checker(environment const & env, local_ctx const & lctx, diagnostics * diag, definition_safety ds,
+                           rewrite_rule_table const & rules):
     m_st_owner(true), m_st(new state(env)), m_diag(diag),
-    m_lctx(lctx), m_definition_safety(ds), m_lparams(nullptr) {
+    m_lctx(lctx), m_definition_safety(ds), m_lparams(nullptr), m_rules(rules) {
 }
 
 type_checker::~type_checker() {
