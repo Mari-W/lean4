@@ -694,7 +694,7 @@ def reduceRewriteStep? (e : Expr) : MetaM (Option Expr) := do
     return none
   let active ← getActiveRewriteRules
   let cands := registered.filterMap fun h =>
-    if active.binSearchContains h (fun a b => a.cmp b == .lt) then env.rewriteRule? h else none
+    if active.binSearchContains h (fun a b => a.quickCmp b == .lt) then env.rewriteRule? h else none
   let cands := cands.qsort fun a b => a.prio > b.prio || (a.prio == b.prio && a.thm.cmp b.thm == .lt)
   let args := e.getAppArgs
   for cand in cands do

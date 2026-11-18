@@ -304,7 +304,7 @@ private def printAxiomsOf (constName : Name) : CommandElabM Unit := do
   | _ => throwUnsupportedSyntax
 
 private def printRulesOf (constName : Name) : CommandElabM Unit := do
-  let rules := (← getEnv).kernelRewriteSet constName
+  let rules := (← getEnv).kernelRewriteSet constName |>.qsort (·.cmp · == .lt)
   if rules.isEmpty then
     logInfo m!"'{constName}' is checked under no rewrite rules"
   else

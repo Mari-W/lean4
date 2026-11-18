@@ -40,7 +40,7 @@ struct rewrite_rule {
 rewrite_rule read_rewrite_rule(environment const & env, name const & thm);
 
 /* The rules of a rule set grouped by head, each group in firing order: by priority, highest
-   first, then in the order of the set, which is sorted by `Name.cmp`. */
+   first, then by `Name.cmp`. */
 class rewrite_rule_table {
     name_map<std::vector<rewrite_rule>> m_table;
 public:

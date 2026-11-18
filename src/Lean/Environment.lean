@@ -228,9 +228,16 @@ structure Rewrites where
   newRules : Array RewriteRule := #[]
   deriving Inhabited
 
-/-- Sorts a rule set by `Name.cmp` and removes duplicates. -/
+/-- Sorts a rule set by `Name.quickCmp` and removes duplicates. The order carries no meaning: each
+head's rules fire by priority, then by `Name.cmp`, and readers that show a set sort it by name. -/
 def canonRewriteSet (s : Array Name) : Array Name :=
-  (s.qsort (fun a b => a.cmp b == .lt)).eraseReps
+  (s.qsort (fun a b => a.quickCmp b == .lt)).eraseReps
+
+private unsafe def sameRuleSetImpl (a b : Array Name) : Bool := ptrEq a b
+
+/-- Pointer equality of two rule sets, a shortcut for `closeRewriteSet`. -/
+@[implemented_by sameRuleSetImpl]
+private def sameRuleSet (_ _ : Array Name) : Bool := false
 
 /--
 An environment stores declarations provided by the user. The kernel
@@ -408,12 +415,30 @@ def rewriteSet (env : Environment) (n : Name) : Array Name :=
 /-- `canon(E ∪ ⋃_{h ∈ E} R(h) ∪ ⋃_{c ∈ consts} R(c))` for the explicit rules `E`. -/
 @[export lean_kernel_close_rewrite_set]
 def closeRewriteSet (env : Environment) (explicitRules consts : Array Name) : Array Name := Id.run do
-  let mut s := #[]
+  let mut s := explicitRules
   for h in explicitRules do
-    s := s.push h ++ env.rewriteSet h
+    s := s ++ env.rewriteSet h
+  let base := canonRewriteSet s
+  -- Most constants share one stored set, so a set already merged is skipped by pointer, and when
+  -- nothing new comes in, a stored set equal to the result is returned to keep that sharing.
+  let mut seen : NameHashSet := base.foldl (·.insert ·) {}
+  let mut extra : Array Name := #[]
+  let mut merged : Array (Array Name) := #[]
+  let mut same? : Option (Array Name) := none
   for c in consts do
-    s := s ++ env.rewriteSet c
-  return canonRewriteSet s
+    let r := env.rewriteSet c
+    if r.isEmpty || merged.any (sameRuleSet · r) then
+      continue
+    merged := merged.push r
+    for n in r do
+      unless seen.contains n do
+        seen := seen.insert n
+        extra := extra.push n
+    if r.size == base.size then
+      same? := some r
+  if extra.isEmpty then
+    return same?.getD base
+  return canonRewriteSet (base ++ extra)
 
 @[export lean_kernel_set_rewrite_set]
 private def setRewriteSet (env : Environment) (n : Name) (set : Array Name) : Environment :=

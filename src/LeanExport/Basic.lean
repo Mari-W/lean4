@@ -430,7 +430,7 @@ where
   /- The `rewrites` field listing `R(n)`, omitted when empty. Dumps each rule's theorem and
   `rewrite` line first. -/
   dumpRuleSet (n : Name) : M (List (String × Json)) := do
-    let rules := (← read).env.toKernelEnv.rewriteSet n
+    let rules := (← read).env.toKernelEnv.rewriteSet n |>.qsort (·.cmp · == .lt)
     if rules.isEmpty then
       return []
     let mut idxs := #[]

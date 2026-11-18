@@ -123,8 +123,8 @@ rewrite_rule_table::rewrite_rule_table(environment const & env, array_ref<name> 
         if (std::vector<rewrite_rule> const * g = m_table.find(r.m_head))
             group = *g;
         group.push_back(r);
-        std::stable_sort(group.begin(), group.end(), [](rewrite_rule const & a, rewrite_rule const & b) {
-                return b.m_prio < a.m_prio;
+        std::sort(group.begin(), group.end(), [](rewrite_rule const & a, rewrite_rule const & b) {
+                return b.m_prio < a.m_prio || (a.m_prio == b.m_prio && cmp(a.m_thm, b.m_thm) < 0);
             });
         m_table.insert(r.m_head, group);
     }
