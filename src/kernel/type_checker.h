@@ -66,6 +66,7 @@ private:
     rewrite_rule_table        m_rules;
     /* Rule firings since the outermost active `whnf`/`whnf_core` call, and the nesting depth of those calls. */
     unsigned                  m_rewrite_fires = 0;
+    unsigned                  m_rewrite_total = 0;
     unsigned                  m_rewrite_depth = 0;
     friend class rewrite_fuel_scope;
 

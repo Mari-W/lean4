@@ -64,8 +64,6 @@ struct check_rule_fn {
             if (!idx.is_small() || idx.get_small_value() >= m_nvars)
                 throw_invalid_rule(m_env, m_thm, sstream() << "its left-hand side has a loose bound variable");
             unsigned j = m_nvars - 1 - idx.get_small_value();
-            if (m_seen[j])
-                throw_invalid_rule(m_env, m_thm, sstream() << "the variable #" << j << " occurs more than once in its left-hand side");
             m_seen[j] = true;
         } else {
             app(p);

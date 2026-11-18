@@ -3,7 +3,7 @@ import Lean
 Kernel rewrite rules end to end: a rule on an axiom head (Symbol style), a rule on a `def` that
 wins over unfolding, a declaration that checks only because of a rule, scoping with
 `rewrite_rules … in` and scoped and local attributes, propagation to dependents, `#print rules`,
-priorities, the firing budget, the checks at registration, and global rules.
+priorities, the firing budget, the checks at registration, non-linear rules, and global rules.
 -/
 namespace RewriteRulesTest
 open Lean Elab Command
@@ -203,14 +203,8 @@ end RewriteRulesTest
 namespace RewriteRulesTest.Invalid
 
 axiom g : Nat → Nat
-axiom g₂ : Nat → Nat → Nat
-axiom nonlinear_ax (n : Nat) : g₂ n n = n
 axiom cond_ax (n : Nat) (h : n = 0) : g n = 0
 axiom lit_ax : g 0 = 0
-
-/-- error: (kernel) invalid rewrite rule 'RewriteRulesTest.Invalid.nonlinear', the variable #0 occurs more than once in its left-hand side -/
-#guard_msgs in
-@[rewrite] theorem nonlinear (n : Nat) : g₂ n n = n := nonlinear_ax n
 
 /-- error: (kernel) invalid rewrite rule 'RewriteRulesTest.Invalid.cond', the variable #1 does not occur in its left-hand side -/
 #guard_msgs in
@@ -238,6 +232,30 @@ rewrite_rules lit_ax in
 example : True := trivial
 
 end RewriteRulesTest.Invalid
+
+/-! ## Non-linear rules: a repeated variable matches definitionally equal subterms -/
+
+namespace RewriteRulesTest.NonLinear
+
+axiom g₂ : Nat → Nat → Nat
+axiom g₂_ax (n : Nat) : g₂ n n = n
+
+@[rewrite] theorem g₂_diag (n : Nat) : g₂ n n = n := g₂_ax n
+
+rewrite_rules g₂_diag in
+example : g₂ 3 3 = 3 := rfl
+
+-- The two arguments are definitionally but not syntactically equal.
+rewrite_rules g₂_diag in
+example : g₂ (1 + 2) 3 = 3 := rfl
+
+-- Different arguments: the rule does not fire.
+rewrite_rules g₂_diag in
+example (h : g₂ 2 3 = 2) : True := by
+  fail_if_success (have : g₂ 2 3 = 2 := rfl)
+  trivial
+
+end RewriteRulesTest.NonLinear
 
 /-! ## Global rules, last because they are in force for every later declaration -/
 

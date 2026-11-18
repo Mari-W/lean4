@@ -449,8 +449,13 @@ bool type_checker::match_rewrite_app(rewrite_rule const & rule, expr const & p, 
 bool type_checker::match_rewrite_pattern(rewrite_rule const & rule, expr const & p, expr const & t, buffer<expr> & subst,
                                          buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks) {
     if (is_bvar(p)) {
-        subst[rule.m_nvars - 1 - bvar_idx(p).get_small_value()] = t;
-        return true;
+        expr & s = subst[rule.m_nvars - 1 - bvar_idx(p).get_small_value()];
+        if (is_eqp(s, expr())) {
+            s = t;
+            return true;
+        }
+        /* a repeated variable of a non-linear left-hand side */
+        return s == t || is_def_eq(s, t);
     }
     buffer<optional<level>> lsubst0(lsubst);
     unsigned nchecks0 = lchecks.size();
@@ -551,9 +556,15 @@ optional<expr> type_checker::reduce_rewrite_step(expr const & e) {
             continue;
         if (rewrite_check_args())
             check_rewrite_args(rule, us, subst);
+        /* The kernel never unfolds a theorem, so a rule theorem's count is its number of firings. */
+        if (m_diag)
+            m_diag->record_unfold(rule.m_thm);
         if (++m_rewrite_fires > LEAN_REWRITE_FIRE_BUDGET)
             throw kernel_exception(env(), sstream() << "rewrite rule budget exhausted: '" << rule.m_thm
                                    << "' would fire past " << LEAN_REWRITE_FIRE_BUDGET << " firings");
+        if (++m_rewrite_total > LEAN_REWRITE_DECL_BUDGET)
+            throw kernel_exception(env(), sstream() << "rewrite rule budget exhausted: '" << rule.m_thm
+                                   << "' would fire past " << LEAN_REWRITE_DECL_BUDGET << " firings in this declaration");
         expr r = instantiate_rev(instantiate_lparams(rule.m_rhs, rule.m_lparams, us), subst.size(), subst.data());
         return some_expr(mk_app(r, args.size() - rule.m_nargs, args.data() + rule.m_nargs));
     }
@@ -709,8 +720,12 @@ expr type_checker::whnf_core(expr const & e, bool cheap_rec, bool cheap_proj) {
             if (auto r = reduce_recursor(e, cheap_rec, cheap_proj)) {
                 if (m_diag) {
                     auto f = get_app_fn(e);
-                    if (is_constant(f))
-                        m_diag->record_unfold(const_name(f));
+                    /* a rule firing is recorded under its theorem in `reduce_rewrite_step` */
+                    if (is_constant(f)) {
+                        optional<constant_info> ci = env().find(const_name(f));
+                        if (ci && (ci->is_recursor() || ci->is_quot()))
+                            m_diag->record_unfold(const_name(f));
+                    }
                 }
                 /* iota-reduction and quotient reduction rules */
                 return whnf_core(*r, cheap_rec, cheap_proj);

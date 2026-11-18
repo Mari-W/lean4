@@ -618,8 +618,9 @@ partial def consumeUnusedLet (e : Expr) (consumeNondep : Bool := false) : Expr :
 /-! # User rewrite rules
 
 A first-order matcher mirroring the kernel's (`type_checker::reduce_rewrite`): a pattern variable
-takes the subterm it meets, a constant application matches syntactically, and a failed match of a
-constant application is retried once on the weak head normal form of the subterm. -/
+takes the subterm it meets, a repeated one must meet a definitionally equal subterm, a constant
+application matches syntactically, and a failed match of a constant application is retried once on
+the weak head normal form of the subterm. -/
 
 private structure RewriteMatch where
   args   : Array (Option Expr)
@@ -657,7 +658,10 @@ private partial def matchRewriteApp (rule : RewriteRuleInfo) (p t : Expr) :
 private partial def matchRewritePattern (rule : RewriteRuleInfo) (p t : Expr) :
     StateT RewriteMatch MetaM Bool := do
   if let .bvar i := p then
-    modify fun s => { s with args := s.args.set! (rule.numVars - 1 - i) (some t) }
+    let k := rule.numVars - 1 - i
+    if let some (some t₀) := (← get).args[k]? then
+      return t₀ == t || (← isDefEq t₀ t)
+    modify fun s => { s with args := s.args.set! k (some t) }
     return true
   let s₀ ← get
   if (← matchRewriteApp rule p t) then
@@ -719,6 +723,9 @@ def reduceRewriteStep? (e : Expr) : MetaM (Option Expr) := do
     modify fun s => { s with rewriteFires := s.rewriteFires + 1 }
     if (← get).rewriteFires > 65536 then
       throwError "rewrite rule budget exhausted: `{.ofConstName cand.thm}` would fire past 65536 firings"
+    modify fun s => { s with rewriteTotal := s.rewriteTotal + 1 }
+    if (← get).rewriteTotal > 16777216 then
+      throwError "rewrite rule budget exhausted: `{.ofConstName cand.thm}` would fire past 16777216 firings in this declaration"
     let rhs := (rule.rhs.instantiateLevelParams rule.levelParams ls).instantiateRev substs
     return some (mkAppN rhs (args.extract pargs.size args.size))
   return none
