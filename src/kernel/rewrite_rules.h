@@ -6,6 +6,7 @@ Author: Marius Weidner
 */
 #pragma once
 #include <vector>
+#include <memory>
 #include "runtime/array_ref.h"
 #include "util/name_map.h"
 #include "util/nat.h"
@@ -42,13 +43,15 @@ rewrite_rule read_rewrite_rule(environment const & env, name const & thm);
 /* The rules of a rule set grouped by head, each group in firing order: by priority, highest
    first, then by `Name.cmp`. */
 class rewrite_rule_table {
-    name_map<std::vector<rewrite_rule>> m_table;
+    typedef name_map<std::vector<rewrite_rule>> table;
+    std::shared_ptr<table const> m_table;
 public:
-    rewrite_rule_table() {}
-    /* Throws a `kernel_exception` if a name in `rules` is not a registered rule. */
+    rewrite_rule_table():m_table(std::make_shared<table const>()) {}
+    /* Throws a `kernel_exception` if a name in `rules` is not a registered rule. Tables are cached per
+       rule set object, which is immutable and names theorems that no later environment changes. */
     rewrite_rule_table(environment const & env, array_ref<name> const & rules);
-    bool empty() const { return m_table.empty(); }
-    bool has_head(name const & head) const { return m_table.contains(head); }
-    std::vector<rewrite_rule> const * find(name const & head) const { return m_table.find(head); }
+    bool empty() const { return m_table->empty(); }
+    bool has_head(name const & head) const { return m_table->contains(head); }
+    std::vector<rewrite_rule> const * find(name const & head) const { return m_table->find(head); }
 };
 }

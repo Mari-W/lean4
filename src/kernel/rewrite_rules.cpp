@@ -6,6 +6,7 @@ Author: Marius Weidner
 */
 #include <vector>
 #include <algorithm>
+#include <unordered_map>
 #include "runtime/sstream.h"
 #include "kernel/rewrite_rules.h"
 #include "kernel/kernel_exception.h"
@@ -115,18 +116,32 @@ rewrite_rule read_rewrite_rule(environment const & env, name const & thm) {
 }
 
 rewrite_rule_table::rewrite_rule_table(environment const & env, array_ref<name> const & rules) {
+    /* Declarations mostly share one rule set object, so a few entries per thread suffice. Each entry
+       keeps its set alive, so its address cannot be reused by another set. */
+    static thread_local std::vector<std::pair<array_ref<name>, std::shared_ptr<table const>>> cache;
+    for (auto const & entry : cache) {
+        if (entry.first.raw() == rules.raw()) {
+            m_table = entry.second;
+            return;
+        }
+    }
+    std::unordered_map<name, std::vector<rewrite_rule>, name_hash_fn> groups;
     for (name const & thm : rules) {
         if (!env.get_rewrite_head(thm))
             throw kernel_exception(env, sstream() << "unknown rewrite rule '" << thm << "'");
         rewrite_rule r = read_rewrite_rule(env, thm);
-        std::vector<rewrite_rule> group;
-        if (std::vector<rewrite_rule> const * g = m_table.find(r.m_head))
-            group = *g;
-        group.push_back(r);
-        std::sort(group.begin(), group.end(), [](rewrite_rule const & a, rewrite_rule const & b) {
+        groups[r.m_head].push_back(r);
+    }
+    auto t = std::make_shared<table>();
+    for (auto & g : groups) {
+        std::sort(g.second.begin(), g.second.end(), [](rewrite_rule const & a, rewrite_rule const & b) {
                 return b.m_prio < a.m_prio || (a.m_prio == b.m_prio && cmp(a.m_thm, b.m_thm) < 0);
             });
-        m_table.insert(r.m_head, group);
+        t->insert(g.first, g.second);
     }
+    m_table = t;
+    if (cache.size() >= 8)
+        cache.erase(cache.begin());
+    cache.emplace_back(rules, m_table);
 }
 }
