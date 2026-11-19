@@ -72,6 +72,8 @@ private:
     unsigned                  m_rewrite_total = 0;
     unsigned                  m_rewrite_depth = 0;
     friend class rewrite_fuel_scope;
+    /* Whether this checker reads and publishes the cache across declarations (`enable_shared_cache`). */
+    bool                      m_shared = false;
 
     expr ensure_sort_core(expr e, expr const & s);
     expr ensure_pi_core(expr e, expr const & s);
@@ -191,7 +193,18 @@ public:
         return whnf_core(e, true, true);
     }
     optional<expr> unfold_definition(expr const & e);
+
+    /** \brief Read the cache across declarations, if `LEAN_KERNEL_XDECL_CACHE` enables it and this
+        checker fires no rules and blocks no abstract definition. Only for checkers on the environment
+        a declaration is added to. */
+    void enable_shared_cache();
+    /** \brief Copy the closed entries of this checker's caches into the cache across declarations.
+        Call once the declaration has been checked successfully. */
+    void publish_shared_cache();
 };
+
+/** \brief Keep the cache across declarations when `new_env` extends `old_env` by one `add`. */
+environment shared_cache_advance(environment const & old_env, environment const & new_env);
 
 void initialize_type_checker();
 void finalize_type_checker();

@@ -194,11 +194,13 @@ environment environment::add_definition(declaration const & d, bool check, rewri
     } else {
         if (check) {
             type_checker checker(*this, diag.get(), definition_safety::safe, rules);
+            checker.enable_shared_cache();
             check_constant_val(*this, v.to_constant_val(), checker);
             check_no_metavar_no_fvar(*this, v.get_name(), v.get_value());
             expr val_type = checker.check(v.get_value(), v.get_lparams());
             if (!checker.is_def_eq(val_type, v.get_type()))
                 throw definition_type_mismatch_exception(*this, d, val_type);
+            checker.publish_shared_cache();
         }
         return diag.update(add(constant_info(d)));
     }
@@ -209,6 +211,7 @@ environment environment::add_theorem(declaration const & d, bool check, rewrite_
     theorem_val const & v = d.to_theorem_val();
     if (check) {
         type_checker checker(*this, diag.get(), definition_safety::safe, rules);
+        checker.enable_shared_cache();
         sharecommon_persistent_fn share;
         expr val(share(v.get_value().raw()));
         expr type(share(v.get_type().raw()));
@@ -219,6 +222,7 @@ environment environment::add_theorem(declaration const & d, bool check, rewrite_
         expr val_type = checker.check(val, v.get_lparams());
         if (!checker.is_def_eq(val_type, type))
             throw definition_type_mismatch_exception(*this, d, val_type);
+        checker.publish_shared_cache();
     }
     return diag.update(add(constant_info(d)));
 }
@@ -228,11 +232,13 @@ environment environment::add_opaque(declaration const & d, bool check, rewrite_r
     opaque_val const & v = d.to_opaque_val();
     if (check) {
         type_checker checker(*this, diag.get(), definition_safety::safe, rules);
+        checker.enable_shared_cache();
         check_constant_val(*this, v.to_constant_val(), checker);
         check_no_metavar_no_fvar(*this, v.get_name(), v.get_value());
         expr val_type = checker.check(v.get_value(), v.get_lparams());
         if (!checker.is_def_eq(val_type, v.get_type()))
             throw definition_type_mismatch_exception(*this, d, val_type);
+        checker.publish_shared_cache();
     }
     return diag.update(add(constant_info(d)));
 }
@@ -426,19 +432,19 @@ static array_ref<name> explicit_rewrite_base(environment const & env, array_ref<
 
 environment environment::add(declaration const & d, bool check, array_ref<name> const & explicit_rules) const {
     if (d.kind() == declaration_kind::Quot)
-        return add_quot();
+        return shared_cache_advance(*this, add_quot());
     /* abstract definitions unfold only while checking a member of their block */
     name decl_name = decl_main_name(d);
     flet<name const *> set_decl(g_current_decl, &decl_name);
     if (explicit_rules.size() == 0 && !has_rewrite_rules()) {
         rewrite_rule_table none;
         switch (d.kind()) {
-        case declaration_kind::Axiom:            return add_axiom(d, check, none);
-        case declaration_kind::Definition:       return add_definition(d, check, none);
-        case declaration_kind::Theorem:          return add_theorem(d, check, none);
-        case declaration_kind::Opaque:           return add_opaque(d, check, none);
-        case declaration_kind::MutualDefinition: return add_mutual(d, check, none);
-        case declaration_kind::Inductive:        return add_inductive(d, none);
+        case declaration_kind::Axiom:            return shared_cache_advance(*this, add_axiom(d, check, none));
+        case declaration_kind::Definition:       return shared_cache_advance(*this, add_definition(d, check, none));
+        case declaration_kind::Theorem:          return shared_cache_advance(*this, add_theorem(d, check, none));
+        case declaration_kind::Opaque:           return shared_cache_advance(*this, add_opaque(d, check, none));
+        case declaration_kind::MutualDefinition: return shared_cache_advance(*this, add_mutual(d, check, none));
+        case declaration_kind::Inductive:        return shared_cache_advance(*this, add_inductive(d, none));
         case declaration_kind::Quot:             break;
         }
         lean_unreachable();
@@ -464,7 +470,7 @@ environment environment::add(declaration const & d, bool check, array_ref<name> 
         for (name const & n : added)
             new_env = new_env.set_rewrite_set(n, set);
     }
-    return new_env;
+    return shared_cache_advance(*this, new_env);
 }
 
 bool environment::has_rewrite_rules() const {
