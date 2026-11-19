@@ -229,6 +229,12 @@ structure Rewrites where
   maps it starts in stage 2, so that adding to a shared environment does not copy the map.
   -/
   sets     : SMap Name (Array Name) := SMap.empty.switch
+  /-- The number of entries of `rules`. -/
+  numRules : Nat := 0
+  /-- One object per stored set content, so that equal sets are shared and compare by pointer. -/
+  interned : PersistentHashMap (Array Name) (Array Name) := {}
+  /-- The set stored last, which is already in `interned`. -/
+  lastSet  : Array Name := #[]
   /-- Rules registered since the import, in registration order. -/
   newRules : Array RewriteRule := #[]
   /--
@@ -424,13 +430,51 @@ def rewritePrio (env : Environment) (thm : Name) : Nat :=
 def rewriteSet (env : Environment) (n : Name) : Array Name :=
   env.rewrites.sets.findD n #[]
 
-/-- `canon(E ∪ ⋃_{h ∈ E} R(h) ∪ ⋃_{c ∈ consts} R(c))` for the explicit rules `E`. -/
-@[export lean_kernel_close_rewrite_set]
-def closeRewriteSet (env : Environment) (explicitRules consts : Array Name) : Array Name := Id.run do
-  let mut s := explicitRules
+/-- Whether `thm` is a registered rewrite rule. -/
+def isRewriteRule (env : Environment) (thm : Name) : Bool :=
+  env.rewrites.rules.contains thm
+
+/-- The registered-rules map. Environments that share this object agree on every registered rule. -/
+@[export lean_kernel_rewrite_rules_map]
+def rewriteRulesMap (env : Environment) : SMap Name RewriteRule :=
+  env.rewrites.rules
+
+/-- Whether the rule set `s`, made of registered rules without repetition, holds every one of them. -/
+@[export lean_kernel_rewrite_set_is_full]
+def rewriteSetIsFull (env : Environment) (s : Array Name) : Bool :=
+  s.size == env.rewrites.numRules
+
+/-- The stored set equal to `s`, or `s` itself. -/
+private def internRewriteSet (env : Environment) (s : Array Name) : Array Name :=
+  if s.isEmpty then s else env.rewrites.interned.findD s s
+
+/-- `canon(E ∪ ⋃_{h ∈ E} R(h))` for the explicit rules `E`. -/
+@[export lean_kernel_close_explicit_rewrite_set]
+def closeExplicitRewriteSet (env : Environment) (explicitRules : Array Name) : Array Name := Id.run do
+  let mut seen : NameHashSet := {}
+  let mut s : Array Name := #[]
   for h in explicitRules do
-    s := s ++ env.rewriteSet h
-  let base := canonRewriteSet s
+    unless seen.contains h do
+      seen := seen.insert h
+      s := s.push h
+  -- A stored set holds registered rules only, so explicit rules that are already all registered
+  -- rules are closed. Skipping the merge keeps a global rule set linear in the number of rules.
+  unless s.size == env.rewrites.numRules && s.all env.isRewriteRule do
+    let mut merged : Array (Array Name) := #[]
+    for h in explicitRules do
+      let r := env.rewriteSet h
+      if r.isEmpty || merged.any (sameRuleSet · r) then
+        continue
+      merged := merged.push r
+      for n in r do
+        unless seen.contains n do
+          seen := seen.insert n
+          s := s.push n
+  return env.internRewriteSet (canonRewriteSet s)
+
+/-- `canon(base ∪ ⋃_{c ∈ consts} R(c))` for a canonical `base` closed under `R`. -/
+@[export lean_kernel_close_rewrite_set_from]
+def closeRewriteSetFrom (env : Environment) (base consts : Array Name) : Array Name := Id.run do
   -- Most constants share one stored set, so a set already merged is skipped by pointer, and when
   -- nothing new comes in, a stored set equal to the result is returned to keep that sharing.
   let mut seen : NameHashSet := base.foldl (·.insert ·) {}
@@ -450,11 +494,24 @@ def closeRewriteSet (env : Environment) (explicitRules consts : Array Name) : Ar
       same? := some r
   if extra.isEmpty then
     return same?.getD base
-  return canonRewriteSet (base ++ extra)
+  return env.internRewriteSet (canonRewriteSet (base ++ extra))
+
+/-- `canon(E ∪ ⋃_{h ∈ E} R(h) ∪ ⋃_{c ∈ consts} R(c))` for the explicit rules `E`. -/
+@[export lean_kernel_close_rewrite_set]
+def closeRewriteSet (env : Environment) (explicitRules consts : Array Name) : Array Name :=
+  env.closeRewriteSetFrom (env.closeExplicitRewriteSet explicitRules) consts
 
 @[export lean_kernel_set_rewrite_set]
 private def setRewriteSet (env : Environment) (n : Name) (set : Array Name) : Environment :=
-  if set.isEmpty then env else { env with rewrites.sets := env.rewrites.sets.insert n set }
+  if set.isEmpty then env else
+    let rw := env.rewrites
+    -- interning hashes the whole set, which the set stored last does not need
+    let (set, interned) :=
+      if sameRuleSet set rw.lastSet then (set, rw.interned)
+      else match rw.interned.find? set with
+        | some s => (s, rw.interned)
+        | none   => (set, rw.interned.insert set set)
+    { env with rewrites := { rw with sets := rw.sets.insert n set, interned, lastSet := set } }
 
 @[export lean_kernel_register_rewrite]
 private def registerRewrite (env : Environment) (thm head : Name) (prio : Nat) : Environment :=
@@ -462,6 +519,7 @@ private def registerRewrite (env : Environment) (thm head : Name) (prio : Nat) :
   { env with rewrites := { env.rewrites with
       rules    := env.rewrites.rules.insert thm rule
       byHead   := env.rewrites.byHead.insert head (env.rewriteRulesFor head |>.push thm)
+      numRules := env.rewrites.numRules + 1
       newRules := env.rewrites.newRules.push rule } }
 
 /-- The declarations that may unfold the abstract definition `c`, if `c` is abstract. -/
@@ -1093,6 +1151,11 @@ def recordRewriteSet (env : Environment) (n : Name) (set : Array Name) : Environ
 @[inherit_doc Kernel.Environment.isAbstract]
 def isAbstract (env : Environment) (c : Name) : Bool :=
   env.base.private.isAbstract c
+
+/-- Whether any definition is abstract. -/
+def hasAbstracts (env : Environment) : Bool :=
+  let a := env.base.private.rewrites.abstracts
+  !(a.map₁.isEmpty && a.map₂.isEmpty)
 
 @[inherit_doc Kernel.Environment.abstractMembers?]
 def abstractMembers? (env : Environment) (c : Name) : Option (Array Name) :=
@@ -2962,6 +3025,8 @@ def Kernel.Rewrites.ofModuleData (mods : Array ModuleData) : Kernel.Rewrites := 
     rules  := SMap.fromHashMap rules false
     byHead := SMap.fromHashMap byHead false
     sets   := SMap.fromHashMap sets false
+    numRules := rules.size
+    interned := interned.fold (init := ({} : PersistentHashMap (Array Name) (Array Name))) fun m k v => m.insert k v
     abstracts := SMap.fromHashMap abstracts false
   }
 

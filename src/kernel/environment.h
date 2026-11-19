@@ -111,8 +111,14 @@ public:
     array_ref<name> get_rewrite_set(name const & n) const;
     /* The abstract definitions the declaration `decl` may not unfold. */
     array_ref<name> get_blocked_abstracts(name const & decl) const;
-    /** \brief `canon(E ∪ ⋃_{h ∈ E} R(h) ∪ ⋃_{c ∈ consts} R(c))`. */
-    array_ref<name> close_rewrite_set(array_ref<name> const & explicit_rules, array_ref<name> const & consts) const;
+    /** \brief `canon(E ∪ ⋃_{h ∈ E} R(h))`. */
+    array_ref<name> close_explicit_rewrite_set(array_ref<name> const & explicit_rules) const;
+    /** \brief `canon(base ∪ ⋃_{c ∈ consts} R(c))` for a canonical `base` closed under `R`. */
+    array_ref<name> close_rewrite_set_from(array_ref<name> const & base, array_ref<name> const & consts) const;
+    /** \brief Whether the rule set `s` holds every registered rule. */
+    bool rewrite_set_is_full(array_ref<name> const & s) const;
+    /** \brief The registered-rules map, which identifies the registered rules. */
+    object_ref get_rewrite_rules_map() const;
     /** \brief Checks that the stored theorem `thm` is a rewrite rule and registers it. */
     environment add_rewrite_rule(name const & thm, nat const & prio) const;
 

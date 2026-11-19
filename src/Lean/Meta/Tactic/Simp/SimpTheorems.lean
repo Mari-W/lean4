@@ -472,6 +472,20 @@ def mkSimpTheoremFromConst (declName : Name) (post := true) (inv := false)
     else
       return #[← withoutExporting do mkSimpTheoremCore origin (mkConst declName us) #[] (mkConst declName) post prio (noIndexAtArgs := false) (checkLhs := checkLhs)]
 
+/--
+Whether `thm` is definitional here. An `rfl` theorem whose statement mentions an abstract definition
+was proved inside the definition's block, so outside it the equation is definitional only where the
+theorem is an active rewrite rule, as in the kernel. Elsewhere `simp` uses it with a proof.
+-/
+def SimpTheorem.isRflHere (thm : SimpTheorem) : MetaM Bool := do
+  unless thm.rfl do return false
+  let env ← getEnv
+  unless env.hasAbstracts do return true
+  let .decl n _ _ := thm.origin | return true
+  let some ci := env.find? n | return true
+  unless (ci.type.find? fun e => e.isConst && env.isAbstract e.constName!).isSome do return true
+  return (← getActiveRewriteRules).contains n
+
 def SimpTheorem.getValue (simpThm : SimpTheorem) : MetaM Expr := do
   if simpThm.proof.isConst && simpThm.levelParams.isEmpty then
     let info ← getConstVal simpThm.proof.constName!

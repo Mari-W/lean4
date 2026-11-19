@@ -48,6 +48,12 @@ namespace LeanExport
 
 public structure Context where
   env : Environment
+  /-- Rules every declaration outside `ruleDeps` is checked under (`LEANEXPORT_RULES`). -/
+  globalRules : Array Name := #[]
+  /-- The rule theorems and everything they depend on, which must not be checked under them. -/
+  ruleDeps : NameSet := {}
+  /-- Theorems exported as axioms, i.e. trusted, for measuring a library some proofs of which fail. -/
+  trusted : NameSet := {}
 
 public structure State where
   visitedNames : HashMap Name Nat := HashMap.emptyWithCapacity 200000 |>.insert .anonymous 0
@@ -64,9 +70,10 @@ public structure State where
 
 public abbrev M := ReaderT Context <| StateT State IO
 
-public def M.run (env : Environment) (act : M α) : IO α :=
+public def M.run (env : Environment) (act : M α) (globalRules : Array Name := #[])
+    (ruleDeps : NameSet := {}) (trusted : NameSet := {}) : IO α :=
   StateT.run' (s := {}) do
-    ReaderT.run (r := { env }) do
+    ReaderT.run (r := { env, globalRules, ruleDeps, trusted }) do
       act
 
 /--
@@ -301,6 +308,17 @@ public partial def dumpConstant (c : Name) : M Unit := do
       ] : List (String × Json)) ++ (← dumpRuleSet c))
     ]
   | .thmInfo val => do
+    if (← read).trusted.contains val.name then
+      dumpDeps val.type
+      dumpObj [
+        ("axiom", Json.mkObj <| ([
+          ("name", ← dumpName val.name),
+          ("levelParams", ← dumpUparams val.levelParams),
+          ("type", ← dumpExpr val.type),
+          ("isUnsafe", false)
+        ] : List (String × Json)) ++ (← dumpRuleSet c))
+      ]
+      return
     dumpDeps val.type
     dumpDeps val.value
     dumpObj [
@@ -437,7 +455,11 @@ where
   /- The `rewrites` field listing `R(n)`, omitted when empty. Dumps each rule's theorem and
   `rewrite` line first. -/
   dumpRuleSet (n : Name) : M (List (String × Json)) := do
-    let rules := (← read).env.toKernelEnv.rewriteSet n |>.qsort (·.cmp · == .lt)
+    let ctx ← read
+    let mut set := ctx.env.toKernelEnv.rewriteSet n
+    if !ctx.globalRules.isEmpty && !ctx.ruleDeps.contains n then
+      set := set ++ ctx.globalRules
+    let rules := (set.qsort (·.cmp · == .lt)).eraseReps
     if rules.isEmpty then
       return []
     let mut idxs := #[]
@@ -489,9 +511,10 @@ Each constant is dumped with its dependencies, so the export is closed under the
 -/
 public def dumpEnv
     (env : Environment) (constants? : Option (List Name) := none) (cliOptions : List String := [])
+    (globalRules : Array Name := #[]) (ruleDeps : NameSet := {}) (trusted : NameSet := {})
 : IO Unit :=
   let constants := constants?.getD (env.constants.toList.map Prod.fst |>.filter (!·.isInternal))
-  M.run env do
+  M.run (globalRules := globalRules) (ruleDeps := ruleDeps) (trusted := trusted) env do
     let _ ← initState env cliOptions
     dumpMetadata
     for c in constants do

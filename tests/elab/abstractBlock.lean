@@ -27,6 +27,19 @@ example : double 3 = 6 := by
 rewrite_rules double_zero double_succ in
 example : double 3 = 6 := rfl
 
+-- `double_zero` is proved by `rfl` inside the block. Outside it, `simp` uses it with a proof, and
+-- `dsimp` cannot use it, unless it is an active rule, which makes it definitional again.
+example : double 3 = 6 := by
+  simp [double_succ, double_zero]
+
+example : double .zero = .zero := by
+  fail_if_success dsimp only [double_zero]
+  simp only [double_zero]
+
+rewrite_rules double_zero in
+example : double .zero = .zero := by
+  dsimp only [double_zero]
+
 /-- error: `abstract_block` declares no definition -/
 #guard_msgs in
 abstract_block

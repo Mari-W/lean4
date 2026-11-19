@@ -40,18 +40,36 @@ struct rewrite_rule {
    of `r` occurs as a `.param` level of a constant in `l`. Throws a `kernel_exception` otherwise. */
 rewrite_rule read_rewrite_rule(environment const & env, name const & thm);
 
+/* The rules of one head in firing order, and the head's constant. The constant is fixed for every
+   environment that shares the registered rules, so it stands in for an environment lookup. */
+struct rewrite_head {
+    optional<constant_info>   m_info;
+    std::vector<rewrite_rule> m_rules;
+};
+
 /* The rules of a rule set grouped by head, each group in firing order: by priority, highest
    first, then by `Name.cmp`. */
 class rewrite_rule_table {
-    typedef name_map<std::vector<rewrite_rule>> table;
+public:
+    struct table {
+        name_map<rewrite_head> m_heads;
+        /* One bit per head name hash, so most constants are rejected without a tree lookup. */
+        uint64_t               m_filter[4] = {0, 0, 0, 0};
+        static unsigned bit(name const & n) { return n.hash() & 255; }
+        bool may_have(name const & n) const { return (m_filter[bit(n) >> 6] >> (bit(n) & 63)) & 1; }
+    };
+private:
     std::shared_ptr<table const> m_table;
 public:
     rewrite_rule_table():m_table(std::make_shared<table const>()) {}
-    /* Throws a `kernel_exception` if a name in `rules` is not a registered rule. Tables are cached per
-       rule set object, which is immutable and names theorems that no later environment changes. */
+    /* Throws a `kernel_exception` if a name in `rules` is not a registered rule. Tables are cached by
+       the set's content together with the registered-rules map it was read under: a theorem name
+       registered in that map names the same theorem in every environment that shares the map. */
     rewrite_rule_table(environment const & env, array_ref<name> const & rules);
-    bool empty() const { return m_table->empty(); }
-    bool has_head(name const & head) const { return m_table->contains(head); }
-    std::vector<rewrite_rule> const * find(name const & head) const { return m_table->find(head); }
+    bool empty() const { return m_table->m_heads.empty(); }
+    bool has_head(name const & head) const { return m_table->may_have(head) && m_table->m_heads.contains(head); }
+    rewrite_head const * find(name const & head) const {
+        return m_table->may_have(head) ? m_table->m_heads.find(head) : nullptr;
+    }
 };
 }

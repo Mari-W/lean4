@@ -100,6 +100,7 @@ private:
     optional<expr> reduce_rewrite(expr const & e, bool stuck = false);
     bool is_stuck_result(expr const & e);
     void note_rewrite_origin(expr const & e, optional<expr> & origin);
+    bool rule_head_unfolds(rewrite_head const & h, expr const & f) const;
     optional<expr> reduce_proj_core(expr c, name const & sname, unsigned idx);
     optional<expr> reduce_proj(expr const & e, bool cheap_rec, bool cheap_proj);
     expr whnf_fvar(expr const & e, bool cheap_rec, bool cheap_proj);

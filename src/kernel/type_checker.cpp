@@ -506,8 +506,17 @@ void type_checker::note_rewrite_origin(expr const & e, optional<expr> & origin) 
     if (origin || m_rules.empty())
         return;
     expr const & f = get_app_fn(e);
-    if (is_constant(f) && m_rules.has_head(const_name(f)) && is_delta(e))
-        origin = e;
+    if (!is_constant(f))
+        return;
+    if (rewrite_head const * h = m_rules.find(const_name(f)))
+        if (rule_head_unfolds(*h, f))
+            origin = e;
+}
+
+/* `is_delta` for an application of the rule head `h`, without the environment lookup. */
+bool type_checker::rule_head_unfolds(rewrite_head const & h, expr const & f) const {
+    return h.m_info && h.m_info->has_value() && length(const_levels(f)) == h.m_info->get_num_lparams() &&
+        !is_abstract_blocked(h.m_info->get_name());
 }
 
 /* `LEAN_REWRITE_CHECK_ARGS=1` makes every firing type-check the matched arguments against the
@@ -540,11 +549,12 @@ optional<expr> type_checker::reduce_rewrite_step(expr const & e, bool stuck) {
     expr const & f = get_app_fn(e);
     if (!is_constant(f))
         return none_expr();
-    std::vector<rewrite_rule> const * rules = m_rules.find(const_name(f));
-    if (!rules)
+    rewrite_head const * h = m_rules.find(const_name(f));
+    if (!h)
         return none_expr();
-    if (!stuck && is_delta(e))
+    if (!stuck && rule_head_unfolds(*h, f))
         return none_expr();
+    std::vector<rewrite_rule> const * rules = &h->m_rules;
     buffer<expr> args;
     get_app_args(e, args);
     for (rewrite_rule const & rule : *rules) {
@@ -694,7 +704,7 @@ expr type_checker::whnf_core(expr const & e, bool cheap_rec, bool cheap_proj) {
         return e;
     case expr_kind::Const:
         /* a rule whose left-hand side is a bare constant */
-        if (!m_rules.has_head(const_name(e)))
+        if (m_rules.empty() || !m_rules.has_head(const_name(e)))
             return e;
         if (auto r = reduce_rewrite(e))
             return whnf_core(*r, cheap_rec, cheap_proj);

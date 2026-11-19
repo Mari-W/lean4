@@ -8,6 +8,7 @@ Author: Marius Weidner
 #include <algorithm>
 #include <unordered_map>
 #include "runtime/sstream.h"
+#include "runtime/hash.h"
 #include "kernel/rewrite_rules.h"
 #include "kernel/kernel_exception.h"
 #include "kernel/for_each_fn.h"
@@ -15,13 +16,21 @@ Author: Marius Weidner
 namespace lean {
 /* `Nat`, `Eq`, `False` and `Quot` with their constructors and recursors. */
 static bool is_rewrite_basis(name const & n) {
-    static char const * const basis[][2] = {
-        {"Nat", nullptr}, {"Nat", "zero"}, {"Nat", "succ"}, {"Nat", "rec"},
-        {"Eq", nullptr}, {"Eq", "refl"}, {"Eq", "rec"},
-        {"False", nullptr}, {"False", "rec"},
-        {"Quot", nullptr}, {"Quot", "mk"}, {"Quot", "lift"}, {"Quot", "ind"}};
-    for (auto const & b : basis) {
-        name c = b[1] ? name{b[0], b[1]} : name(b[0]);
+    /* Built once and never freed, like the table cache below. */
+    static std::vector<name> const * basis = [] {
+        static char const * const strs[][2] = {
+            {"Nat", nullptr}, {"Nat", "zero"}, {"Nat", "succ"}, {"Nat", "rec"},
+            {"Eq", nullptr}, {"Eq", "refl"}, {"Eq", "rec"},
+            {"False", nullptr}, {"False", "rec"},
+            {"Quot", nullptr}, {"Quot", "mk"}, {"Quot", "lift"}, {"Quot", "ind"}};
+        auto * r = new std::vector<name>();
+        for (auto const & b : strs) {
+            r->push_back(b[1] ? name{b[0], b[1]} : name(b[0]));
+            mark_persistent(r->back().raw());
+        }
+        return r;
+    }();
+    for (name const & c : *basis) {
         if (n == c)
             return true;
     }
@@ -115,15 +124,51 @@ rewrite_rule read_rewrite_rule(environment const & env, name const & thm) {
     return rewrite_rule{thm, const_name(head), env.get_rewrite_prio(thm), info.get_lparams(), nvars, get_app_num_args(lhs), lhs, rhs};
 }
 
+static uint64_t rule_set_hash(array_ref<name> const & s) {
+    uint64_t h = s.size();
+    for (name const & n : s)
+        h = hash(h, n.hash());
+    return h;
+}
+
+static bool same_rule_set(array_ref<name> const & a, array_ref<name> const & b) {
+    if (a.raw() == b.raw())
+        return true;
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (a[i] != b[i])
+            return false;
+    }
+    return true;
+}
+
+namespace {
+struct rule_table_cache_entry {
+    object_ref                                       m_rules_map;
+    array_ref<name>                                  m_set;
+    uint64_t                                         m_hash;
+    std::shared_ptr<rewrite_rule_table::table const> m_table;
+};
+}
+
 rewrite_rule_table::rewrite_rule_table(environment const & env, array_ref<name> const & rules) {
-    /* Declarations mostly share one rule set object, so a few entries per thread suffice. Each entry
-       keeps its set alive, so its address cannot be reused by another set. The cache is never freed:
-       a destructor at thread exit would release Lean objects after the runtime has shut down. */
-    static thread_local auto * cache_ptr = new std::vector<std::pair<array_ref<name>, std::shared_ptr<table const>>>();
+    /* Each entry keeps its set and rules map alive, so their addresses cannot be reused. The cache is
+       never freed: a destructor at thread exit would release Lean objects after the runtime has shut
+       down. */
+    static thread_local auto * cache_ptr = new std::vector<rule_table_cache_entry>();
     auto & cache = *cache_ptr;
+    object_ref rules_map = env.get_rewrite_rules_map();
     for (auto const & entry : cache) {
-        if (entry.first.raw() == rules.raw()) {
-            m_table = entry.second;
+        if (entry.m_set.raw() == rules.raw() && entry.m_rules_map.raw() == rules_map.raw()) {
+            m_table = entry.m_table;
+            return;
+        }
+    }
+    uint64_t h = rule_set_hash(rules);
+    for (auto const & entry : cache) {
+        if (entry.m_hash == h && entry.m_rules_map.raw() == rules_map.raw() && same_rule_set(entry.m_set, rules)) {
+            m_table = entry.m_table;
             return;
         }
     }
@@ -139,11 +184,13 @@ rewrite_rule_table::rewrite_rule_table(environment const & env, array_ref<name> 
         std::sort(g.second.begin(), g.second.end(), [](rewrite_rule const & a, rewrite_rule const & b) {
                 return b.m_prio < a.m_prio || (a.m_prio == b.m_prio && cmp(a.m_thm, b.m_thm) < 0);
             });
-        t->insert(g.first, g.second);
+        t->m_heads.insert(g.first, rewrite_head{env.find(g.first), g.second});
+        unsigned b = table::bit(g.first);
+        t->m_filter[b >> 6] |= uint64_t(1) << (b & 63);
     }
     m_table = t;
     if (cache.size() >= 8)
         cache.erase(cache.begin());
-    cache.emplace_back(rules, m_table);
+    cache.push_back(rule_table_cache_entry{rules_map, rules, h, m_table});
 }
 }

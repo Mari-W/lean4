@@ -107,7 +107,7 @@ where
       return false
 
 private def useImplicitDefEqProof (thm : SimpTheorem) : SimpM Bool := do
-  if thm.rfl || (thm.backwardRfl && backward.defeqAttrib.useBackward.get (← getOptions)) then
+  if (← thm.isRflHere) || (thm.backwardRfl && backward.defeqAttrib.useBackward.get (← getOptions)) then
     return (← getConfig).implicitDefEqProofs
   else
     return false
@@ -223,7 +223,7 @@ where
         checkSystem "simp"
         if inErasedSet thm then continue
         if rflOnly then
-          unless thm.rfl || (useBackward && thm.backwardRfl) do
+          unless (← thm.isRflHere) || (useBackward && thm.backwardRfl) do
             if debug.tactic.simp.checkDefEqAttr.get (← getOptions) &&
                backward.dsimp.useDefEqAttr.get (← getOptions) then
               let isRflOld ← withOptions (backward.dsimp.useDefEqAttr.set · false) do
@@ -253,7 +253,7 @@ where
       let useBackward := backward.defeqAttrib.useBackward.get (← getOptions)
       for thm in candidates do
         checkSystem "simp"
-        unless inErasedSet thm || (rflOnly && !(thm.rfl || (useBackward && thm.backwardRfl))) do
+        unless inErasedSet thm || (rflOnly && !((← thm.isRflHere) || (useBackward && thm.backwardRfl))) do
           let result? ← withNewMCtxDepth do
             let val  ← thm.getValue
             let type ← inferType val

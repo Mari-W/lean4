@@ -31,7 +31,10 @@ extern "C" uint8 lean_kernel_diag_is_enabled(object*);
 extern "C" uint8 lean_kernel_has_rewrite_rules(object*);
 extern "C" object* lean_kernel_rewrite_head(object*, object*);
 extern "C" object* lean_kernel_rewrite_set(object*, object*);
-extern "C" object* lean_kernel_close_rewrite_set(object*, object*, object*);
+extern "C" object* lean_kernel_close_explicit_rewrite_set(object*, object*);
+extern "C" object* lean_kernel_close_rewrite_set_from(object*, object*, object*);
+extern "C" uint8 lean_kernel_rewrite_set_is_full(object*, object*);
+extern "C" object* lean_kernel_rewrite_rules_map(object*);
 extern "C" object* lean_kernel_set_rewrite_set(object*, object*, object*);
 extern "C" object* lean_kernel_register_rewrite(object*, object*, object*, object*);
 extern "C" object* lean_kernel_rewrite_prio(object*, object*);
@@ -391,16 +394,42 @@ array_ref<name> environment::get_blocked_abstracts(name const & decl) const {
     return array_ref<name>(lean_kernel_blocked_abstracts(to_obj_arg(), decl.to_obj_arg()));
 }
 
+/* `close_explicit_rewrite_set` after checking that the explicit rules are registered, and whether the
+   result holds every registered rule. Callers pass the same explicit-rule object for many
+   declarations, so the last one is cached under the registered-rules map it was computed for. */
+static array_ref<name> explicit_rewrite_base(environment const & env, array_ref<name> const & explicit_rules, bool & full) {
+    struct entry {
+        object_ref      m_rules_map;
+        array_ref<name> m_explicit;
+        array_ref<name> m_base;
+        bool            m_full;
+    };
+    /* never freed, like the rule table cache */
+    static thread_local auto * cache = new std::vector<entry>();
+    object_ref rules_map = env.get_rewrite_rules_map();
+    for (entry const & e : *cache) {
+        if (e.m_explicit.raw() == explicit_rules.raw() && e.m_rules_map.raw() == rules_map.raw()) {
+            full = e.m_full;
+            return e.m_base;
+        }
+    }
+    for (name const & h : explicit_rules) {
+        if (!env.get_rewrite_head(h))
+            throw kernel_exception(env, sstream() << "unknown rewrite rule '" << h << "'");
+    }
+    array_ref<name> base = env.close_explicit_rewrite_set(explicit_rules);
+    full = env.rewrite_set_is_full(base);
+    cache->clear();
+    cache->push_back(entry{rules_map, explicit_rules, base, full});
+    return base;
+}
+
 environment environment::add(declaration const & d, bool check, array_ref<name> const & explicit_rules) const {
     if (d.kind() == declaration_kind::Quot)
         return add_quot();
     /* abstract definitions unfold only while checking a member of their block */
     name decl_name = decl_main_name(d);
     flet<name const *> set_decl(g_current_decl, &decl_name);
-    for (name const & h : explicit_rules) {
-        if (!get_rewrite_head(h))
-            throw kernel_exception(*this, sstream() << "unknown rewrite rule '" << h << "'");
-    }
     if (explicit_rules.size() == 0 && !has_rewrite_rules()) {
         rewrite_rule_table none;
         switch (d.kind()) {
@@ -414,7 +443,10 @@ environment environment::add(declaration const & d, bool check, array_ref<name> 
         }
         lean_unreachable();
     }
-    array_ref<name> set = close_rewrite_set(explicit_rules, get_decl_constants(d));
+    bool full;
+    array_ref<name> base = explicit_rewrite_base(*this, explicit_rules, full);
+    /* a stored set holds registered rules only, so no constant can add to a full base */
+    array_ref<name> set = full ? base : close_rewrite_set_from(base, get_decl_constants(d));
     rewrite_rule_table rules(*this, set);
     environment new_env = *this;
     switch (d.kind()) {
@@ -447,8 +479,20 @@ array_ref<name> environment::get_rewrite_set(name const & n) const {
     return array_ref<name>(lean_kernel_rewrite_set(to_obj_arg(), n.to_obj_arg()));
 }
 
-array_ref<name> environment::close_rewrite_set(array_ref<name> const & explicit_rules, array_ref<name> const & consts) const {
-    return array_ref<name>(lean_kernel_close_rewrite_set(to_obj_arg(), explicit_rules.to_obj_arg(), consts.to_obj_arg()));
+array_ref<name> environment::close_explicit_rewrite_set(array_ref<name> const & explicit_rules) const {
+    return array_ref<name>(lean_kernel_close_explicit_rewrite_set(to_obj_arg(), explicit_rules.to_obj_arg()));
+}
+
+array_ref<name> environment::close_rewrite_set_from(array_ref<name> const & base, array_ref<name> const & consts) const {
+    return array_ref<name>(lean_kernel_close_rewrite_set_from(to_obj_arg(), base.to_obj_arg(), consts.to_obj_arg()));
+}
+
+bool environment::rewrite_set_is_full(array_ref<name> const & s) const {
+    return lean_kernel_rewrite_set_is_full(to_obj_arg(), s.to_obj_arg()) != 0;
+}
+
+object_ref environment::get_rewrite_rules_map() const {
+    return object_ref(lean_kernel_rewrite_rules_map(to_obj_arg()));
 }
 
 environment environment::set_rewrite_set(name const & n, array_ref<name> const & s) const {
