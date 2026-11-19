@@ -524,7 +524,9 @@ bool type_checker::match_rewrite_levels(rewrite_rule const & rule, levels const 
                 i++;
             }
             if (lsubst[i]) {
-                if (*lsubst[i] != l)
+                /* a repeated level parameter matches levels equal up to level equivalence,
+                   so `max u v` matches `max v u` */
+                if (!is_equivalent(*lsubst[i], l))
                     return false;
             } else {
                 lsubst[i] = l;
@@ -700,7 +702,7 @@ optional<expr> type_checker::reduce_rewrite_step(expr const & e, bool stuck) {
         names bound_ps(bound);
         /* a level pattern over a parameter that no `.param` position binds never matches */
         for (auto const & c : lchecks) {
-            if (get_undef_param(c.first, bound_ps) || instantiate(c.first, rule.m_lparams, us) != c.second) {
+            if (get_undef_param(c.first, bound_ps) || !is_equivalent(instantiate(c.first, rule.m_lparams, us), c.second)) {
                 ok = false;
                 break;
             }

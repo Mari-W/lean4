@@ -178,6 +178,15 @@ def withEqnOptions (declName : Name) (act : MetaM α) : MetaM α := do
   withOptions setOpts act
 
 /--
+Throws an error if `declName` is an abstract definition (`abstract_block`) outside its block. Its
+equation theorems would state its unfolding, which the kernel rejects there.
+-/
+def throwIfAbstract (declName : Name) : MetaM Unit := do
+  if (← getEnv).isAbstract declName then
+    throwError "`{.ofConstName declName}` is abstract outside its `abstract_block`, so it has no \
+      equation theorems here. Use its rewrite rules or equations proved inside the block."
+
+/--
 Simple equation theorem for nonrecursive definitions.
 -/
 def mkSimpleEqThm (declName : Name) (name : Name) : MetaM (Option Name) := do
@@ -254,6 +263,7 @@ private def getEqnsFor?Core (declName : Name) : MetaM (Option (Array Name)) := w
     return none
   if let some eqs ← alreadyGenerated? declName then
     return some eqs
+  throwIfAbstract declName
   for f in (← getEqnsFnsRef.get) do
     if let some r ← f declName then
       registerEqnThms declName r
@@ -328,6 +338,7 @@ def getUnfoldEqnFor? (declName : Name) (nonRec := false) : MetaM (Option Name) :
     if env.contains unfoldName then
       return some unfoldName
     if (← shouldGenerateEqnThms declName) then
+      throwIfAbstract declName
       if (← isRecursiveDefinition declName) then
         for f in (← getUnfoldEqnFnsRef.get) do
           if let some r ← f declName then

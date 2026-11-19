@@ -11,6 +11,8 @@ def double (n : Nat) : Nat := n + n
 -- inside the block `double` unfolds
 theorem double_two : double 2 = 4 := rfl
 
+theorem double_eq (n : Nat) : double n = n + n := rfl
+
 @[rewrite] theorem double_zero : double .zero = .zero := rfl
 
 @[rewrite] theorem double_succ (n : Nat) : double n.succ = (double n).succ.succ := by
@@ -39,6 +41,40 @@ example : double .zero = .zero := by
 rewrite_rules double_zero in
 example : double .zero = .zero := by
   dsimp only [double_zero]
+
+-- Outside the block `double` has no equation theorems, because the kernel rejects its unfolding
+-- there. `dsimp`, `simp`, `unfold` and `rw` say so, and `delta` does not unfold it.
+/--
+error: `double` is abstract outside its `abstract_block`, so it has no equation theorems here. Use its rewrite rules or equations proved inside the block.
+---
+error: `dsimp` made no progress
+-/
+#guard_msgs in
+example (n : Nat) : double n = n + n := by dsimp [double]
+
+/--
+error: `double` is abstract outside its `abstract_block`, so it has no equation theorems here. Use its rewrite rules or equations proved inside the block.
+---
+error: `simp` made no progress
+-/
+#guard_msgs in
+example (n : Nat) : double n = n + n := by simp [double]
+
+/--
+error: `double` is abstract outside its `abstract_block`, so it has no equation theorems here. Use its rewrite rules or equations proved inside the block.
+-/
+#guard_msgs in
+example (n : Nat) : double n = n + n := by unfold double; rfl
+
+/--
+error: `double` is abstract outside its `abstract_block`, so it has no equation theorems here. Use its rewrite rules or equations proved inside the block.
+-/
+#guard_msgs in
+example (n : Nat) : double n = n + n := by rw [double]
+
+example (n : Nat) : double n = n + n := by
+  fail_if_success delta double
+  exact double_eq n
 
 /-- error: `abstract_block` declares no definition -/
 #guard_msgs in

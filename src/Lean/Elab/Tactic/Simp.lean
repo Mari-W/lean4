@@ -278,6 +278,7 @@ private def elabDeclToUnfoldOrTheorem (config : Meta.ConfigWithKey) (id : Origin
         throwError m!"Invalid `←` modifier: `{.ofConstName declName}` is a declaration name to be unfolded"
           ++ .hint' m!"The simplifier cannot \"refold\" definitions by name. Use `rw` for this instead,
                       or use the `←` simp modifier with an equational lemma for `{.ofConstName declName}`."
+      throwIfAbstract declName
       if kind == .dsimp then
         return .addEntries #[.toUnfold declName]
       else
