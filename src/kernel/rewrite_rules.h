@@ -67,6 +67,8 @@ public:
        registered in that map names the same theorem in every environment that shares the map. */
     rewrite_rule_table(environment const & env, array_ref<name> const & rules);
     bool empty() const { return m_table->m_heads.empty(); }
+    /* The same token means the same rules; null for an empty table. */
+    std::shared_ptr<void const> token() const { return empty() ? nullptr : std::shared_ptr<void const>(m_table); }
     bool has_head(name const & head) const { return m_table->may_have(head) && m_table->m_heads.contains(head); }
     rewrite_head const * find(name const & head) const {
         return m_table->may_have(head) ? m_table->m_heads.find(head) : nullptr;

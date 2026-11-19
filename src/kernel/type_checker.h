@@ -201,6 +201,9 @@ public:
     /** \brief Copy the closed entries of this checker's caches into the cache across declarations.
         Call once the declaration has been checked successfully. */
     void publish_shared_cache();
+    /** \brief Whether this checker reads and publishes the cache across declarations now: it was
+        enabled and the checker's own caches are still small. */
+    bool shared_cache_on() const;
 };
 
 /** \brief Keep the cache across declarations when `new_env` extends `old_env` by one `add`. */

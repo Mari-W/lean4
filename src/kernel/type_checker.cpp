@@ -54,19 +54,27 @@ static expr * g_nat_shiftRight = nullptr;
 type_checker::state::state(environment const & env):
     m_env(env), m_ngen(*g_kernel_fresh) {}
 
-/* Cache across declarations for closed terms. Only checkers that fire no rules and block no abstract
-   definition fill and read it, so an entry depends only on the constants of the environment, which
-   `m_consts` holds. `add` only inserts new names, so entries stay valid on the constant map that
-   `add` returns (`shared_cache_advance`); any other map, e.g. a branch or a rolled back environment,
-   empties the cache. Holding `m_consts` keeps its address from being reused. */
+/* Cache across declarations for closed terms. Only checkers that block no abstract definition fill
+   and read it, so an entry depends only on the constants of the environment, which `m_consts` holds,
+   and on the rule table, which `m_rules` holds. `add` only inserts new names, so entries stay valid
+   on the constant map that `add` returns (`shared_cache_advance`); any other map, e.g. a branch or a
+   rolled back environment, or another rule table empties the cache. Holding both keeps their
+   addresses from being reused. It holds whnf, inferred types and defeq successes. whnf_core results
+   are cheap to recompute and only cost memory there. */
 static size_t g_xdecl_max = 0;
+/* A declaration whose own caches outgrow this many entries stops reading the shared cache and does
+   not publish into it. Hot declarations then run as without the cache, and their large local
+   caches do not flush the shared one. */
+static size_t const g_xdecl_local_max = 100000;
 struct xdecl_cache {
     struct generation {
-        expr_map<expr> m_whnf_core, m_whnf, m_infer;
+        expr_map<expr> m_whnf, m_infer;
         lean::unordered_set<expr_pair, expr_pair_hash, expr_pair_eq> m_success;
-        size_t size() const { return m_whnf_core.size() + m_whnf.size() + m_infer.size() + m_success.size(); }
+        size_t size() const { return m_whnf.size() + m_infer.size() + m_success.size(); }
     };
     object_ref m_consts;
+    /* the rules the entries were computed with */
+    std::shared_ptr<void const> m_rules;
     /* new and old; a full new generation replaces the old one */
     generation m_gen[2];
     void clear() { m_gen[0] = generation(); m_gen[1] = generation(); }
@@ -77,18 +85,18 @@ static thread_local xdecl_cache * g_xdecl = nullptr;
 static bool is_closed(expr const & e) { return !has_fvar(e) && !has_loose_bvars(e); }
 static object * env_consts(environment const & env) { return cnstr_get(env.raw(), 0); }
 
+/* A hit in the old generation moves into the new one. */
 static optional<expr> xdecl_find(expr_map<expr> xdecl_cache::generation::* m, expr const & e) {
     auto & g0 = g_xdecl->m_gen[0].*m;
     auto it = g0.find(e);
-    if (it != g0.end())
-        return some_expr(it->second);
-    auto & g1 = g_xdecl->m_gen[1].*m;
-    it = g1.find(e);
-    if (it == g1.end())
-        return none_expr();
-    expr r = it->second;
-    g0.insert(mk_pair(e, r));
-    return some_expr(r);
+    if (it == g0.end()) {
+        auto & g1 = g_xdecl->m_gen[1].*m;
+        it = g1.find(e);
+        if (it == g1.end())
+            return none_expr();
+        g0.insert(*it);
+    }
+    return some_expr(it->second);
 }
 
 static bool xdecl_success(expr const & t, expr const & s) {
@@ -106,8 +114,13 @@ static bool xdecl_success(expr const & t, expr const & s) {
     return false;
 }
 
+bool type_checker::shared_cache_on() const {
+    return m_shared &&
+        m_st->m_whnf_core.size() + m_st->m_whnf.size() + m_st->m_infer_type[1].size() + m_st->m_success.size() <= g_xdecl_local_max;
+}
+
 void type_checker::enable_shared_cache() {
-    if (g_xdecl_max == 0 || !m_rules.empty())
+    if (g_xdecl_max == 0)
         return;
     is_abstract_blocked(name());
     if (!m_abstract_blocked->empty())
@@ -115,15 +128,17 @@ void type_checker::enable_shared_cache() {
     if (!g_xdecl)
         g_xdecl = new xdecl_cache();
     object * c = env_consts(env());
-    if (g_xdecl->m_consts.raw() != c) {
+    std::shared_ptr<void const> rules = m_rules.token();
+    if (g_xdecl->m_consts.raw() != c || g_xdecl->m_rules != rules) {
         g_xdecl->clear();
         g_xdecl->m_consts = object_ref(c, true);
+        g_xdecl->m_rules = rules;
     }
     m_shared = true;
 }
 
 void type_checker::publish_shared_cache() {
-    if (!m_shared || g_xdecl->m_consts.raw() != env_consts(env()))
+    if (!shared_cache_on() || g_xdecl->m_consts.raw() != env_consts(env()) || g_xdecl->m_rules != m_rules.token())
         return;
     auto & g = g_xdecl->m_gen[0];
     auto copy = [](expr_map<expr> const & from, expr_map<expr> & to) {
@@ -131,7 +146,6 @@ void type_checker::publish_shared_cache() {
             if (is_closed(p.first) && is_closed(p.second))
                 to.insert(p);
     };
-    copy(m_st->m_whnf_core, g.m_whnf_core);
     copy(m_st->m_whnf, g.m_whnf);
     copy(m_st->m_infer_type[1], g.m_infer);
     for (auto const & p : m_st->m_success)
@@ -428,7 +442,7 @@ expr type_checker::infer_type_core(expr const & e, bool infer_only) {
     if (it != m_st->m_infer_type[infer_only].end())
         return it->second;
     /* inference that checks depends on the declaration's level parameters and safety */
-    if (infer_only && m_shared && !has_fvar(e))
+    if (infer_only && !has_fvar(e) && shared_cache_on())
         if (auto r = xdecl_find(&xdecl_cache::generation::m_infer, e))
             return *r;
 
@@ -824,9 +838,6 @@ expr type_checker::whnf_core(expr const & e, bool cheap_rec, bool cheap_proj) {
     auto it = m_st->m_whnf_core.find(e);
     if (it != m_st->m_whnf_core.end())
         return it->second;
-    if (m_shared && !cheap_rec && !cheap_proj && is_closed(e))
-        if (auto r = xdecl_find(&xdecl_cache::generation::m_whnf_core, e))
-            return *r;
 
     // do the actual work
     expr r;
@@ -1076,7 +1087,7 @@ expr type_checker::whnf(expr const & e) {
     auto it = m_st->m_whnf.find(e);
     if (it != m_st->m_whnf.end())
         return it->second;
-    if (m_shared && is_closed(e))
+    if (is_closed(e) && shared_cache_on())
         if (auto r = xdecl_find(&xdecl_cache::generation::m_whnf, e))
             return *r;
 
@@ -1301,7 +1312,7 @@ bool type_checker::succeeded_before(expr const & t, expr const & s) const {
         r = m_st->m_success.find(mk_pair(t, s)) != m_st->m_success.end() ||
             m_st->m_success.find(mk_pair(s, t)) != m_st->m_success.end();
     }
-    return r || (m_shared && is_closed(t) && is_closed(s) && xdecl_success(t, s));
+    return r || (is_closed(t) && is_closed(s) && shared_cache_on() && xdecl_success(t, s));
 }
 
 void type_checker::cache_success(expr const & t, expr const & s) {
