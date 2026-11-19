@@ -5,6 +5,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Marius Weidner
 */
 #include <vector>
+#include <cstdlib>
 #include <algorithm>
 #include <unordered_map>
 #include "runtime/sstream.h"
@@ -211,14 +212,23 @@ rewrite_rule_table::rewrite_rule_table(environment const & env, array_ref<name> 
         rewrite_rule r = read_rewrite_rule(env, thm);
         groups[r.m_head].push_back(r);
     }
+    /* LEAN_REWRITE_BD_ONLY=1 (experiment): a marked rule fires only before unfolding, so it stays out of
+       the table of rules that fire where unfolding gets stuck. */
+    static bool const bd_only = [] { char const * s = getenv("LEAN_REWRITE_BD_ONLY"); return s && s[0] == '1'; }();
     auto t = std::make_shared<table>();
     for (auto & g : groups) {
         std::sort(g.second.begin(), g.second.end(), [](rewrite_rule const & a, rewrite_rule const & b) {
                 return b.m_prio < a.m_prio || (a.m_prio == b.m_prio && cmp(a.m_thm, b.m_thm) < 0);
             });
-        t->m_heads.insert(g.first, rewrite_head{env.find(g.first), g.second});
-        unsigned b = table::bit(g.first);
-        t->m_filter[b >> 6] |= uint64_t(1) << (b & 63);
+        std::vector<rewrite_rule> plain;
+        for (rewrite_rule const & r : g.second)
+            if (!bd_only || !r.m_before_delta)
+                plain.push_back(r);
+        if (!plain.empty()) {
+            t->m_heads.insert(g.first, rewrite_head{env.find(g.first), plain});
+            unsigned b = table::bit(g.first);
+            t->m_filter[b >> 6] |= uint64_t(1) << (b & 63);
+        }
         /* the rules that fire before unfolding, grouped by key, each group in firing order */
         for (rewrite_rule const & r : g.second) {
             if (!r.m_before_delta)

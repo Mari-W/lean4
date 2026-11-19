@@ -101,7 +101,7 @@ private:
                                buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks);
     optional<expr> reduce_rewrite_step(expr const & e, bool stuck = false);
     optional<expr> fire_first_rule(std::vector<rewrite_rule> const & rules, expr const & f, buffer<expr> const & args);
-    optional<expr> reduce_before_delta(expr const & e);
+    optional<expr> reduce_before_delta(expr const & e, unsigned site = 0);
     void unfold_lazy(expr & e, optional<expr> * origin, bool rules);
     void check_rewrite_args(rewrite_rule const & rule, levels const & us, buffer<expr> const & subst);
     optional<expr> reduce_rewrite(expr const & e, bool stuck = false);

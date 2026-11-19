@@ -740,7 +740,26 @@ optional<expr> type_checker::reduce_rewrite_step(expr const & e, bool stuck) {
    per group. Such rules match syntactically, without reducing any argument, so the test never
    reduces what unfolding would not. The rules of a head that does not unfold fire in `whnf_core`
    already, all of them in priority order. */
-optional<expr> type_checker::reduce_before_delta(expr const & e) {
+/* Diagnostics of the test before unfolding (experiment): `KREPLAY_DIAG` counts these names. */
+static name const & rbd_diag_name(unsigned site, unsigned what) {
+    /* never freed: a destructor at exit would release Lean objects after the runtime has shut down */
+    static name const * names = new name[9]{
+        name({"_rbd", "whnf", "keymiss"}), name({"_rbd", "whnf", "nomatch"}), name({"_rbd", "whnf", "fire"}),
+        name({"_rbd", "lazy1", "keymiss"}), name({"_rbd", "lazy1", "nomatch"}), name({"_rbd", "lazy1", "fire"}),
+        name({"_rbd", "lazy2", "keymiss"}), name({"_rbd", "lazy2", "nomatch"}), name({"_rbd", "lazy2", "fire"})};
+    return names[site * 3 + what];
+}
+
+/* LEAN_REWRITE_BD_RETRY=1 lets marked rules reduce non-matching arguments, as ordinary rules do (experiment). */
+static bool before_delta_retry() {
+    static bool const on = [] {
+        char const * s = getenv("LEAN_REWRITE_BD_RETRY");
+        return s != nullptr && s[0] == '1';
+    }();
+    return on;
+}
+
+optional<expr> type_checker::reduce_before_delta(expr const & e, unsigned site) {
     if (!m_rules.has_before_delta())
         return none_expr();
     expr const & f = get_app_fn(e);
@@ -764,12 +783,19 @@ optional<expr> type_checker::reduce_before_delta(expr const & e) {
         several = several || hit;
         hit = &g;
     }
-    if (!hit || !rule_head_unfolds(h->m_info, f))
+    if (!hit || !rule_head_unfolds(h->m_info, f)) {
+        if (m_diag && !hit)
+            m_diag->record_unfold(rbd_diag_name(site, 0));
         return none_expr();
+    }
     rewrite_fuel_scope fuel(*this);
-    flet<bool> syntactic(m_rewrite_syntactic, true);
-    if (!several)
-        return fire_first_rule(hit->m_rules, f, args);
+    flet<bool> syntactic(m_rewrite_syntactic, !before_delta_retry());
+    if (!several) {
+        optional<expr> r = fire_first_rule(hit->m_rules, f, args);
+        if (m_diag)
+            m_diag->record_unfold(rbd_diag_name(site, r ? 2 : 1));
+        return r;
+    }
     /* several keys match: their rules together, in firing order */
     std::vector<rewrite_rule> rules;
     for (rewrite_pre_group const & g : h->m_groups) {
@@ -1159,7 +1185,7 @@ expr type_checker::whnf(expr const & e) {
         if (auto v = reduce_nat(t1)) {
             m_st->m_whnf.insert(mk_pair(e, *v));
             return *v;
-        } else if (auto r = reduce_before_delta(t1)) {
+        } else if (auto r = reduce_before_delta(t1, 0)) {
             t = *r;
         } else if (auto next_t = unfold_definition(t1)) {
             note_rewrite_origin(t1, origin);
@@ -1399,7 +1425,7 @@ optional<expr> type_checker::try_unfold_proj_app(expr const & e) {
 
 /* Which rules marked `@[rewrite ↓]` fire in the lazy delta steps of the defeq check (experiment):
    0 only when they fire on both sides, 1 when they fire on both sides or when only one side or two
-   different heads unfold, 2 never. */
+   different heads unfold, 2 never, 3 on every side that unfolds. */
 static unsigned before_delta_policy() {
     static unsigned const p = [] {
         char const * s = getenv("LEAN_REWRITE_BD_POLICY");
@@ -1412,7 +1438,7 @@ static unsigned before_delta_policy() {
    `e`. A rule that fired on the term `origin` remembers has had its turn, so `origin` is dropped. */
 void type_checker::unfold_lazy(expr & e, optional<expr> * origin, bool rules) {
     if (rules) {
-        if (optional<expr> r = reduce_before_delta(e)) {
+        if (optional<expr> r = reduce_before_delta(e, 1)) {
             if (origin && *origin && is_eqp(**origin, e))
                 *origin = none_expr();
             e = whnf_core(*r, false, true);
@@ -1434,9 +1460,9 @@ auto type_checker::lazy_delta_reduction_step(expr & t_n, expr & s_n, optional<ex
     auto d_t = is_delta(t_n);
     auto d_s = is_delta(s_n);
     unsigned policy = m_rules.has_before_delta() ? before_delta_policy() : 2;
-    bool one = policy == 1;
+    bool one = policy == 1 || policy == 3;
     optional<expr> b_t, b_s;
-    if (policy == 0 && d_t && d_s && (b_t = reduce_before_delta(t_n)) && (b_s = reduce_before_delta(s_n))) {
+    if (policy == 0 && d_t && d_s && (b_t = reduce_before_delta(t_n, 2)) && (b_s = reduce_before_delta(s_n, 2))) {
         if (t_origin && *t_origin && is_eqp(**t_origin, t_n)) *t_origin = none_expr();
         if (s_origin && *s_origin && is_eqp(**s_origin, s_n)) *s_origin = none_expr();
         t_n = whnf_core(*b_t, false, true);
@@ -1470,8 +1496,8 @@ auto type_checker::lazy_delta_reduction_step(expr & t_n, expr & s_n, optional<ex
             unfold_lazy(t_n, t_origin, one);
         } else if (c > 0) {
             unfold_lazy(s_n, s_origin, one);
-        } else if (one && !is_eqp(*d_t, *d_s)) {
-            /* two different heads unfold, each may fire its own rules */
+        } else if (one && (policy == 3 || !is_eqp(*d_t, *d_s))) {
+            /* two different heads unfold, each may fire its own rules (policy 3: also the same head) */
             unfold_lazy(t_n, t_origin, true);
             unfold_lazy(s_n, s_origin, true);
         } else {
@@ -1491,7 +1517,7 @@ auto type_checker::lazy_delta_reduction_step(expr & t_n, expr & s_n, optional<ex
             }
             /* the same head on both sides: its rules fire only if they fire on both sides, so the two
                sides keep the same shape */
-            if (one && (b_t = reduce_before_delta(t_n)) && (b_s = reduce_before_delta(s_n))) {
+            if (one && (b_t = reduce_before_delta(t_n, 2)) && (b_s = reduce_before_delta(s_n, 2))) {
                 if (t_origin && *t_origin && is_eqp(**t_origin, t_n)) *t_origin = none_expr();
                 if (s_origin && *s_origin && is_eqp(**s_origin, s_n)) *s_origin = none_expr();
                 t_n = whnf_core(*b_t, false, true);
