@@ -82,6 +82,35 @@ struct check_rule_fn {
 };
 }
 
+/* The key of a rule with left-hand side `lhs`: the first argument in an instance-implicit position
+   of the head whose pattern has a constant head, else the first argument whose pattern has one. */
+static void set_rewrite_rule_key(environment const & env, rewrite_rule & r) {
+    buffer<expr> args;
+    expr const & f = get_app_args(r.m_lhs, args);
+    optional<constant_info> info = env.find(const_name(f));
+    expr t = info ? info->get_type() : expr();
+    unsigned first = UINT_MAX;
+    for (unsigned i = 0; i < args.size(); i++) {
+        bool inst = info && is_pi(t) && is_inst_implicit(binding_info(t));
+        if (info && is_pi(t))
+            t = binding_body(t);
+        expr const & h = get_app_fn(args[i]);
+        if (!is_constant(h))
+            continue;
+        if (inst) {
+            r.m_key_pos = i;
+            r.m_key_const = const_name(h);
+            return;
+        }
+        if (first == UINT_MAX)
+            first = i;
+    }
+    if (first != UINT_MAX) {
+        r.m_key_pos = first;
+        r.m_key_const = const_name(get_app_fn(args[first]));
+    }
+}
+
 rewrite_rule read_rewrite_rule(environment const & env, name const & thm) {
     constant_info info = env.get(thm);
     expr type = info.get_type();
@@ -121,7 +150,10 @@ rewrite_rule read_rewrite_rule(environment const & env, name const & thm) {
                 throw_invalid_rule(env, thm, sstream() << "the universe parameter '" << *undef << "' of its right-hand side does not occur in its left-hand side");
             return true;
         });
-    return rewrite_rule{thm, const_name(head), env.get_rewrite_prio(thm), info.get_lparams(), nvars, get_app_num_args(lhs), lhs, rhs};
+    rewrite_rule r{thm, const_name(head), env.get_rewrite_prio(thm), env.get_rewrite_before_delta(thm),
+                   info.get_lparams(), nvars, get_app_num_args(lhs), lhs, rhs};
+    set_rewrite_rule_key(env, r);
+    return r;
 }
 
 static uint64_t rule_set_hash(array_ref<name> const & s) {
@@ -187,6 +219,24 @@ rewrite_rule_table::rewrite_rule_table(environment const & env, array_ref<name> 
         t->m_heads.insert(g.first, rewrite_head{env.find(g.first), g.second});
         unsigned b = table::bit(g.first);
         t->m_filter[b >> 6] |= uint64_t(1) << (b & 63);
+        /* the rules that fire before unfolding, grouped by key, each group in firing order */
+        for (rewrite_rule const & r : g.second) {
+            if (!r.m_before_delta)
+                continue;
+            rewrite_pre_head & ph = t->m_pre[g.first];
+            if (!ph.m_info)
+                ph.m_info = env.find(g.first);
+            rewrite_pre_group * grp = nullptr;
+            for (rewrite_pre_group & x : ph.m_groups)
+                if (x.m_pos == r.m_key_pos && x.m_const == r.m_key_const)
+                    grp = &x;
+            if (!grp) {
+                ph.m_groups.push_back(rewrite_pre_group{r.m_key_pos, r.m_key_const, {}});
+                grp = &ph.m_groups.back();
+            }
+            grp->m_rules.push_back(r);
+            t->m_has_pre = true;
+        }
     }
     m_table = t;
     if (cache.size() >= 8)

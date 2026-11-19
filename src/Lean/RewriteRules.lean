@@ -76,10 +76,30 @@ def getRewriteRuleInfo? (env : Environment) (thm : Name) : Option RewriteRuleInf
     return { thm, levelParams := info.levelParams, numVars, lhs, rhs }
   | _ => none
 
+/--
+Reads the arguments of `@[rewrite ↓ p]` or `@[global_rewrite ↓ p]`: whether `↓` is given and the
+priority, and registers `declName` as a rule unless it already is one. Applying the attribute to a
+registered rule changes nothing, so a given `↓` or priority must agree with the registered rule.
+-/
+private def addRewriteAttr (declName : Name) (stx : Syntax) : AttrM Unit := do
+  let (bdStx, prioStx) :=
+    if stx.getKind == `Lean.Parser.Attr.simple then (Syntax.missing, stx[1]) else (stx[1], stx[2])
+  let beforeDelta := !bdStx.isNone && !bdStx.isMissing
+  let prio ← getAttrParamOptPrio prioStx
+  match (← getEnv).rewriteRule? declName with
+  | some rule =>
+    unless rule.prio == prio || prioStx.isNone do
+      throwError "`{.ofConstName declName}` is already a rewrite rule with priority {rule.prio}"
+    if beforeDelta && !rule.beforeDelta then
+      throwError "`{.ofConstName declName}` is already a rewrite rule that fires only when unfolding its head gets stuck"
+  | none => setEnv (← ofExceptKernelException ((← getEnv).addRewriteRule declName prio beforeDelta))
+
 /-
 `@[rewrite p]` registers a theorem `∀ xs, l = r` as a kernel rewrite rule with priority `p`
 (default 1000). `@[scoped rewrite]` and `@[local rewrite]` also put the rule in force for the
 declarations of the scope. Applying the attribute to a registered rule only does the latter.
+`@[rewrite ↓]` registers a rule that fires before its head is unfolded. Any other rule on a head
+that unfolds fires only where the unfolding gets stuck.
 -/
 builtin_initialize
   registerBuiltinAttribute {
@@ -88,19 +108,14 @@ builtin_initialize
     descr           := "kernel rewrite rule"
     applicationTime := .afterTypeChecking
     add             := fun declName stx kind => do
-      let prio ← getAttrParamOptPrio stx[1]
-      match (← getEnv).rewriteRule? declName with
-      | some rule =>
-        unless rule.prio == prio || stx[1].isNone do
-          throwError "`{.ofConstName declName}` is already a rewrite rule with priority {rule.prio}"
-      | none => setEnv (← ofExceptKernelException ((← getEnv).addRewriteRule declName prio))
+      addRewriteAttr declName stx
       if kind != .global then
         rewriteScopeExt.add declName kind
   }
 
 /-
 `@[global_rewrite p]` registers a rule like `@[rewrite p]` and puts it in force for every later
-declaration of this module and of every module importing it.
+declaration of this module and of every module importing it. `@[global_rewrite ↓]` as `@[rewrite ↓]`.
 -/
 builtin_initialize
   registerBuiltinAttribute {
@@ -111,12 +126,7 @@ builtin_initialize
     add             := fun declName stx kind => do
       unless kind == .global do
         throwError "`@[global_rewrite]` cannot be `scoped` or `local`"
-      let prio ← getAttrParamOptPrio stx[1]
-      match (← getEnv).rewriteRule? declName with
-      | some rule =>
-        unless rule.prio == prio || stx[1].isNone do
-          throwError "`{.ofConstName declName}` is already a rewrite rule with priority {rule.prio}"
-      | none => setEnv (← ofExceptKernelException ((← getEnv).addRewriteRule declName prio))
+      addRewriteAttr declName stx
       rewriteScopeExt.add declName .global
   }
 

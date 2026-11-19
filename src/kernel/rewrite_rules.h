@@ -7,6 +7,8 @@ Author: Marius Weidner
 #pragma once
 #include <vector>
 #include <memory>
+#include <climits>
+#include <unordered_map>
 #include "runtime/array_ref.h"
 #include "util/name_map.h"
 #include "util/nat.h"
@@ -26,12 +28,18 @@ struct rewrite_rule {
     name     m_head;
     /* Priority; the rules of a head fire highest first, then by `Name.cmp`. */
     nat      m_prio;
+    /* `@[rewrite ↓]`: the rule fires before its head is unfolded, not only when the unfolding gets stuck. */
+    bool     m_before_delta;
     names    m_lparams;
     unsigned m_nvars;
     /* Number of arguments the head takes in `m_lhs`. */
     unsigned m_nargs;
     expr     m_lhs;
     expr     m_rhs;
+    /* The key of the rule (`rewrite_rule_key`): the argument position `m_key_pos` of `m_lhs` whose
+       pattern has the constant head `m_key_const`, or `UINT_MAX` if no argument has one. */
+    unsigned m_key_pos = UINT_MAX;
+    name     m_key_const;
 };
 
 /* Read the rule stored as `thm`, checking the version 1 fragment: the statement is `∀ xs, l = r`,
@@ -47,6 +55,21 @@ struct rewrite_head {
     std::vector<rewrite_rule> m_rules;
 };
 
+/* The rules of one head that fire before unfolding and share a key, in firing order. */
+struct rewrite_pre_group {
+    unsigned                  m_pos;
+    name                      m_const;
+    std::vector<rewrite_rule> m_rules;
+};
+
+/* The rules of one head that fire before unfolding, grouped by key. A term is a candidate for a
+   group if its argument at `m_pos` has the head constant `m_const`; a group with `m_pos ==
+   UINT_MAX` takes every term. */
+struct rewrite_pre_head {
+    optional<constant_info>        m_info;
+    std::vector<rewrite_pre_group> m_groups;
+};
+
 /* The rules of a rule set grouped by head, each group in firing order: by priority, highest
    first, then by `Name.cmp`. */
 class rewrite_rule_table {
@@ -57,6 +80,9 @@ public:
         uint64_t               m_filter[4] = {0, 0, 0, 0};
         static unsigned bit(name const & n) { return n.hash() & 255; }
         bool may_have(name const & n) const { return (m_filter[bit(n) >> 6] >> (bit(n) & 63)) & 1; }
+        /* The heads with rules that fire before unfolding, hashed. */
+        std::unordered_map<name, rewrite_pre_head, name_hash_fn> m_pre;
+        bool                   m_has_pre = false;
     };
 private:
     std::shared_ptr<table const> m_table;
@@ -72,6 +98,13 @@ public:
     bool has_head(name const & head) const { return m_table->may_have(head) && m_table->m_heads.contains(head); }
     rewrite_head const * find(name const & head) const {
         return m_table->may_have(head) ? m_table->m_heads.find(head) : nullptr;
+    }
+    /* Whether a rule fires before unfolding. */
+    bool has_before_delta() const { return m_table->m_has_pre; }
+    /* The rules of `head` that fire before unfolding, if any. */
+    rewrite_pre_head const * find_before_delta(name const & head) const {
+        auto it = m_table->m_pre.find(head);
+        return it == m_table->m_pre.end() ? nullptr : &it->second;
     }
 };
 }

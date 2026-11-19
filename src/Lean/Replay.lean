@@ -68,7 +68,7 @@ def addDecl (name : Name) (d : Declaration) : M Unit := do
   | .ok env => modify fun s => { s with env := env }
   | .error ex => throwKernelException ex
   if let some rule := (← read).rewrites.rules.find? name then
-    match (← get).env.addRewriteRule name rule.prio with
+    match (← get).env.addRewriteRule name rule.prio rule.beforeDelta with
     | .ok env => modify fun s => { s with env := env }
     | .error ex => throwKernelException ex
   -- an abstract definition carries its members, so registering it right away is faithful

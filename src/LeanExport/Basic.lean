@@ -332,11 +332,11 @@ public partial def dumpConstant (c : Name) : M Unit := do
     ]
     if let some rule := (← read).env.toKernelEnv.rewriteRule? val.name then
       dumpObj [
-        ("rewrite", Json.mkObj [
+        ("rewrite", Json.mkObj <| ([
           ("name", ← dumpName rule.thm),
           ("head", ← dumpName rule.head),
-          ("prio", rule.prio)
-        ])
+          ("prio", toJson rule.prio)
+        ] : List (String × Json)) ++ (if rule.beforeDelta then [("beforeDeltaKey", toJson rule.keyArg)] else []))
       ]
   | .quotInfo _ =>
     -- Always dump full Quot package in the sensible order

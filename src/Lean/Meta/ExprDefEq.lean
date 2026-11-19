@@ -1688,11 +1688,33 @@ private def tryHeuristic (t s : Expr) : MetaM Bool := do
       isDefEqArgs tFn t.getAppArgs s.getAppArgs <&&>
         isListLevelDefEqAux tFn.constLevels! sFn.constLevels!
 
-/-- Auxiliary method for isDefEqDelta -/
-private abbrev unfold (e : Expr) (failK : MetaM α) (successK : Expr → MetaM α) : MetaM α := do
+/-- Auxiliary method for isDefEqDelta. Unfolds `e`, without firing rules. -/
+private abbrev unfoldPlain (e : Expr) (failK : MetaM α) (successK : Expr → MetaM α) : MetaM α := do
   match (← unfoldDefinition? e) with
   | some e => successK e
   | none   => failK
+
+/--
+Auxiliary method for isDefEqDelta. Unfolds `e`, or fires a rule marked `@[rewrite ↓]` in its place,
+as the kernel does when only one side or two different heads unfold.
+-/
+private abbrev unfold (e : Expr) (failK : MetaM α) (successK : Expr → MetaM α) : MetaM α := do
+  match (← unfoldDefinition? e) with
+  | some e' =>
+    match (← withRewriteFuel (reduceRewriteBeforeDelta? e)) with
+    | some r => successK r
+    | none   => successK e'
+  | none   => failK
+
+/--
+Rules marked `@[rewrite ↓]` on the same head on both sides fire only if they fire on both sides, so
+that the two sides keep the same shape, as in the kernel.
+-/
+private def rewriteBothBeforeDelta? (t s : Expr) : MetaM (Option (Expr × Expr)) := withRewriteFuel do
+  let some t' ← reduceRewriteBeforeDelta? t | return none
+  let some s' ← reduceRewriteBeforeDelta? s | return none
+  unless (← unfoldDefinition? t).isSome && (← unfoldDefinition? s).isSome do return none
+  return some (t', s')
 
 /-- Auxiliary method for isDefEqDelta -/
 private def unfoldBothDefEq (fn : Name) (t s : Expr) : MetaM LBool := do
@@ -1701,16 +1723,20 @@ private def unfoldBothDefEq (fn : Name) (t s : Expr) : MetaM LBool := do
     match (← isListLevelDefEq ls₁ ls₂) with
     | .true => return .true
     | _ =>
-    unfold t (pure .undef) fun t =>
-    unfold s (pure .undef) fun s =>
+    if let some (t, s) ← rewriteBothBeforeDelta? t s then
+      return ← isDefEqLeftRight fn t s
+    unfoldPlain t (pure .undef) fun t =>
+    unfoldPlain s (pure .undef) fun s =>
       isDefEqLeftRight fn t s
   | .app _ _,     .app _ _     =>
     if (← tryHeuristic t s) then
       return .true
+    else if let some (t, s) ← rewriteBothBeforeDelta? t s then
+      isDefEqLeftRight fn t s
     else
-      unfold t
-       (unfold s (pure .undef) fun s => isDefEqRight fn t s)
-       (fun t => unfold s (isDefEqLeft fn t s) (fun s => isDefEqLeftRight fn t s))
+      unfoldPlain t
+       (unfoldPlain s (pure .undef) fun s => isDefEqRight fn t s)
+       (fun t => unfoldPlain s (isDefEqLeft fn t s) (fun s => isDefEqLeftRight fn t s))
   | _, _ => return .false
 
 private def sameHeadSymbol (t s : Expr) : Bool :=

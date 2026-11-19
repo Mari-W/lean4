@@ -75,7 +75,8 @@ class LEAN_EXPORT environment : public object_ref {
     environment add_quot() const;
     environment add_inductive(declaration const & d, rewrite_rule_table const & rules) const;
     environment set_rewrite_set(name const & n, array_ref<name> const & s) const;
-    environment register_rewrite_rule(name const & thm, name const & head, nat const & prio) const;
+    environment register_rewrite_rule(name const & thm, name const & head, nat const & prio, bool before_delta,
+                                      nat const & key_arg, name const & key_const) const;
 public:
     environment(environment const & other):object_ref(other) {}
     environment(environment && other) noexcept:object_ref(std::move(other)) {}
@@ -107,6 +108,8 @@ public:
     optional<name> get_rewrite_head(name const & thm) const;
     /** \brief The priority of the registered rewrite rule `thm`. */
     nat get_rewrite_prio(name const & thm) const;
+    /** \brief Whether the registered rewrite rule `thm` fires before its head is unfolded. */
+    bool get_rewrite_before_delta(name const & thm) const;
     /** \brief The stored rule set `R(n)`, empty if none is stored. */
     array_ref<name> get_rewrite_set(name const & n) const;
     /* The abstract definitions the declaration `decl` may not unfold. */
@@ -120,7 +123,7 @@ public:
     /** \brief The registered-rules map, which identifies the registered rules. */
     object_ref get_rewrite_rules_map() const;
     /** \brief Checks that the stored theorem `thm` is a rewrite rule and registers it. */
-    environment add_rewrite_rule(name const & thm, nat const & prio) const;
+    environment add_rewrite_rule(name const & thm, nat const & prio, bool before_delta = false) const;
 
     /** \brief Pointer equality */
     friend bool is_eqp(environment const & e1, environment const & e2) {

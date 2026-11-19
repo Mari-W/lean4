@@ -57,7 +57,8 @@ def main (args : List String) : IO Unit := do
   let env ← importModules imports {}
   let constants? := constants.tail?.map fun cs =>
     cs.map fun c => Syntax.decodeNameLit ("`" ++ c) |>.get!
-  -- `LEANEXPORT_RULES=file` (one theorem per line, optional priority) registers rewrite rules that
+  -- `LEANEXPORT_RULES=file` (one theorem per line, optional priority, optional `↓` for a rule that
+  -- fires before its head is unfolded, as `@[rewrite ↓]`) registers rewrite rules that
   -- every declaration outside their dependencies is checked under, and `LEANEXPORT_ABSTRACT=file`
   -- makes definitions abstract with the rule theorems as members, as in an `abstract_block`.
   -- Together they export a proof of concept without rebuilding the library. See also
@@ -74,7 +75,7 @@ def main (args : List String) : IO Unit := do
     let ws := line.trimAscii.toString.splitOn " " |>.filter (!·.isEmpty)
     let thm := toName ws[0]!
     let prio := (ws[1]?.bind (·.toNat?)).getD 1000
-    match env.addRewriteRule thm prio with
+    match env.addRewriteRule thm prio (ws.contains "↓") with
     | .ok e => env := e
     | .error ex => fail s!"rule {thm}" ex
     rules := rules.push thm

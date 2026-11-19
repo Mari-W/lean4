@@ -5,6 +5,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Leonardo de Moura
 */
 #include <utility>
+#include <algorithm>
 #include <vector>
 #include <limits>
 #include <climits>
@@ -570,12 +571,14 @@ bool type_checker::match_rewrite_pattern(rewrite_rule const & rule, expr const &
             return true;
         }
         /* a repeated variable of a non-linear left-hand side */
-        return s == t || is_def_eq(s, t);
+        return s == t || (!m_rewrite_syntactic && is_def_eq(s, t));
     }
     buffer<optional<level>> lsubst0(lsubst);
     unsigned nchecks0 = lchecks.size();
     if (match_rewrite_app(rule, p, t, subst, lsubst, lchecks))
         return true;
+    if (m_rewrite_syntactic)
+        return false;
     lsubst = lsubst0;
     lchecks.shrink(nchecks0);
     expr t2 = whnf(t);
@@ -624,14 +627,14 @@ void type_checker::note_rewrite_origin(expr const & e, optional<expr> & origin) 
     if (!is_constant(f))
         return;
     if (rewrite_head const * h = m_rules.find(const_name(f)))
-        if (rule_head_unfolds(*h, f))
+        if (rule_head_unfolds(h->m_info, f))
             origin = e;
 }
 
-/* `is_delta` for an application of the rule head `h`, without the environment lookup. */
-bool type_checker::rule_head_unfolds(rewrite_head const & h, expr const & f) const {
-    return h.m_info && h.m_info->has_value() && length(const_levels(f)) == h.m_info->get_num_lparams() &&
-        !is_abstract_blocked(h.m_info->get_name());
+/* `is_delta` for an application of a rule head with constant `info`, without the environment lookup. */
+bool type_checker::rule_head_unfolds(optional<constant_info> const & info, expr const & f) const {
+    return info && info->has_value() && length(const_levels(f)) == info->get_num_lparams() &&
+        !is_abstract_blocked(info->get_name());
 }
 
 /* `LEAN_REWRITE_CHECK_ARGS=1` makes every firing type-check the matched arguments against the
@@ -655,24 +658,10 @@ void type_checker::check_rewrite_args(rewrite_rule const & rule, levels const & 
     }
 }
 
-/* Fire the first rule of `m_rules` whose left-hand side matches a prefix of the application `e`. */
-/* `stuck` says that the caller unfolded `e` and the result was stuck. Otherwise a rule on a head
-   that unfolds does not fire, so delta comes first. */
-optional<expr> type_checker::reduce_rewrite_step(expr const & e, bool stuck) {
-    if (m_rules.empty())
-        return none_expr();
-    expr const & f = get_app_fn(e);
-    if (!is_constant(f))
-        return none_expr();
-    rewrite_head const * h = m_rules.find(const_name(f));
-    if (!h)
-        return none_expr();
-    if (!stuck && rule_head_unfolds(*h, f))
-        return none_expr();
-    std::vector<rewrite_rule> const * rules = &h->m_rules;
-    buffer<expr> args;
-    get_app_args(e, args);
-    for (rewrite_rule const & rule : *rules) {
+/* Fire the first rule of `rules` whose left-hand side matches a prefix of the application `e` with
+   head `f` and arguments `args`. */
+optional<expr> type_checker::fire_first_rule(std::vector<rewrite_rule> const & rules, expr const & f, buffer<expr> const & args) {
+    for (rewrite_rule const & rule : rules) {
         if (args.size() < rule.m_nargs)
             continue;
         buffer<expr> subst;
@@ -724,6 +713,75 @@ optional<expr> type_checker::reduce_rewrite_step(expr const & e, bool stuck) {
         return some_expr(mk_app(r, args.size() - rule.m_nargs, args.data() + rule.m_nargs));
     }
     return none_expr();
+}
+
+/* Fire the first rule of `m_rules` whose left-hand side matches a prefix of the application `e`.
+   `stuck` says that the caller unfolded `e` and the result was stuck. Otherwise a rule on a head that
+   unfolds does not fire, so delta comes first. */
+optional<expr> type_checker::reduce_rewrite_step(expr const & e, bool stuck) {
+    if (m_rules.empty())
+        return none_expr();
+    expr const & f = get_app_fn(e);
+    if (!is_constant(f))
+        return none_expr();
+    rewrite_head const * h = m_rules.find(const_name(f));
+    if (!h)
+        return none_expr();
+    if (!stuck && rule_head_unfolds(h->m_info, f))
+        return none_expr();
+    buffer<expr> args;
+    get_app_args(e, args);
+    return fire_first_rule(h->m_rules, f, args);
+}
+
+/* Fire a rule marked `@[rewrite ↓]` on `e`, whose head is about to be unfolded. A rule set without such
+   rules costs one test, and a head without them one hash lookup. A head with them groups its rules by
+   key, so a term whose argument at the key position has another head constant costs one comparison
+   per group. Such rules match syntactically, without reducing any argument, so the test never
+   reduces what unfolding would not. The rules of a head that does not unfold fire in `whnf_core`
+   already, all of them in priority order. */
+optional<expr> type_checker::reduce_before_delta(expr const & e) {
+    if (!m_rules.has_before_delta())
+        return none_expr();
+    expr const & f = get_app_fn(e);
+    if (!is_constant(f))
+        return none_expr();
+    rewrite_pre_head const * h = m_rules.find_before_delta(const_name(f));
+    if (!h)
+        return none_expr();
+    buffer<expr> args;
+    get_app_args(e, args);
+    rewrite_pre_group const * hit = nullptr;
+    bool several = false;
+    for (rewrite_pre_group const & g : h->m_groups) {
+        if (g.m_pos != UINT_MAX) {
+            if (g.m_pos >= args.size())
+                continue;
+            expr const & a = get_app_fn(args[g.m_pos]);
+            if (!is_constant(a) || const_name(a) != g.m_const)
+                continue;
+        }
+        several = several || hit;
+        hit = &g;
+    }
+    if (!hit || !rule_head_unfolds(h->m_info, f))
+        return none_expr();
+    rewrite_fuel_scope fuel(*this);
+    flet<bool> syntactic(m_rewrite_syntactic, true);
+    if (!several)
+        return fire_first_rule(hit->m_rules, f, args);
+    /* several keys match: their rules together, in firing order */
+    std::vector<rewrite_rule> rules;
+    for (rewrite_pre_group const & g : h->m_groups) {
+        if (g.m_pos != UINT_MAX && (g.m_pos >= args.size() || !is_constant(get_app_fn(args[g.m_pos])) ||
+                                    const_name(get_app_fn(args[g.m_pos])) != g.m_const))
+            continue;
+        rules.insert(rules.end(), g.m_rules.begin(), g.m_rules.end());
+    }
+    std::sort(rules.begin(), rules.end(), [](rewrite_rule const & a, rewrite_rule const & b) {
+            return b.m_prio < a.m_prio || (a.m_prio == b.m_prio && cmp(a.m_thm, b.m_thm) < 0);
+        });
+    return fire_first_rule(rules, f, args);
 }
 
 /** \brief Apply normalizer extensions to \c e.
@@ -1101,6 +1159,8 @@ expr type_checker::whnf(expr const & e) {
         if (auto v = reduce_nat(t1)) {
             m_st->m_whnf.insert(mk_pair(e, *v));
             return *v;
+        } else if (auto r = reduce_before_delta(t1)) {
+            t = *r;
         } else if (auto next_t = unfold_definition(t1)) {
             note_rewrite_origin(t1, origin);
             t = *next_t;
@@ -1337,6 +1397,31 @@ optional<expr> type_checker::try_unfold_proj_app(expr const & e) {
     return none_expr();
 }
 
+/* Which rules marked `@[rewrite ↓]` fire in the lazy delta steps of the defeq check (experiment):
+   0 only when they fire on both sides, 1 when they fire on both sides or when only one side or two
+   different heads unfold, 2 never. */
+static unsigned before_delta_policy() {
+    static unsigned const p = [] {
+        char const * s = getenv("LEAN_REWRITE_BD_POLICY");
+        return s ? static_cast<unsigned>(strtoul(s, nullptr, 10)) : 1u;
+    }();
+    return p;
+}
+
+/* One lazy delta step on `e`: fire a rule marked `@[rewrite ↓]` if `rules` allows it, otherwise unfold
+   `e`. A rule that fired on the term `origin` remembers has had its turn, so `origin` is dropped. */
+void type_checker::unfold_lazy(expr & e, optional<expr> * origin, bool rules) {
+    if (rules) {
+        if (optional<expr> r = reduce_before_delta(e)) {
+            if (origin && *origin && is_eqp(**origin, e))
+                *origin = none_expr();
+            e = whnf_core(*r, false, true);
+            return;
+        }
+    }
+    e = whnf_core(*unfold_definition(e), false, true);
+}
+
 /** \brief Perform one lazy delta-reduction step.
      Return
      - l_true if t_n and s_n are definitionally equal.
@@ -1344,10 +1429,19 @@ optional<expr> type_checker::try_unfold_proj_app(expr const & e) {
      - l_undef it the step did not manage to establish whether they are definitionally equal or not.
 
      \remark t_n, s_n and cs are updated. */
-auto type_checker::lazy_delta_reduction_step(expr & t_n, expr & s_n) -> reduction_status {
+auto type_checker::lazy_delta_reduction_step(expr & t_n, expr & s_n, optional<expr> * t_origin,
+                                             optional<expr> * s_origin) -> reduction_status {
     auto d_t = is_delta(t_n);
     auto d_s = is_delta(s_n);
-    if (!d_t && !d_s) {
+    unsigned policy = m_rules.has_before_delta() ? before_delta_policy() : 2;
+    bool one = policy == 1;
+    optional<expr> b_t, b_s;
+    if (policy == 0 && d_t && d_s && (b_t = reduce_before_delta(t_n)) && (b_s = reduce_before_delta(s_n))) {
+        if (t_origin && *t_origin && is_eqp(**t_origin, t_n)) *t_origin = none_expr();
+        if (s_origin && *s_origin && is_eqp(**s_origin, s_n)) *s_origin = none_expr();
+        t_n = whnf_core(*b_t, false, true);
+        s_n = whnf_core(*b_s, false, true);
+    } else if (!d_t && !d_s) {
         return reduction_status::DefUnknown;
     } else if (d_t && !d_s) {
         /* If `s_n` is a projection application, we try to unfold it instead.
@@ -1361,21 +1455,25 @@ auto type_checker::lazy_delta_reduction_step(expr & t_n, expr & s_n) -> reductio
         if (auto s_n_new = try_unfold_proj_app(s_n)) {
             s_n = *s_n_new;
         } else {
-            t_n = whnf_core(*unfold_definition(t_n), false, true);
+            unfold_lazy(t_n, t_origin, one);
         }
     } else if (!d_t && d_s) {
         /* If `t_n` is a projection application, we try to unfold it instead. See comment above. */
         if (auto t_n_new = try_unfold_proj_app(t_n)) {
             t_n = *t_n_new;
         } else {
-            s_n = whnf_core(*unfold_definition(s_n), false, true);
+            unfold_lazy(s_n, s_origin, one);
         }
     } else {
         int c = compare(d_t->get_hints(), d_s->get_hints());
         if (c < 0) {
-            t_n = whnf_core(*unfold_definition(t_n), false, true);
+            unfold_lazy(t_n, t_origin, one);
         } else if (c > 0) {
-            s_n = whnf_core(*unfold_definition(s_n), false, true);
+            unfold_lazy(s_n, s_origin, one);
+        } else if (one && !is_eqp(*d_t, *d_s)) {
+            /* two different heads unfold, each may fire its own rules */
+            unfold_lazy(t_n, t_origin, true);
+            unfold_lazy(s_n, s_origin, true);
         } else {
             if (is_app(t_n) && is_app(s_n) && is_eqp(*d_t, *d_s) && d_t->get_hints().is_regular()) {
                 // Optimization:
@@ -1391,8 +1489,17 @@ auto type_checker::lazy_delta_reduction_step(expr & t_n, expr & s_n) -> reductio
                     }
                 }
             }
-            t_n = whnf_core(*unfold_definition(t_n), false, true);
-            s_n = whnf_core(*unfold_definition(s_n), false, true);
+            /* the same head on both sides: its rules fire only if they fire on both sides, so the two
+               sides keep the same shape */
+            if (one && (b_t = reduce_before_delta(t_n)) && (b_s = reduce_before_delta(s_n))) {
+                if (t_origin && *t_origin && is_eqp(**t_origin, t_n)) *t_origin = none_expr();
+                if (s_origin && *s_origin && is_eqp(**s_origin, s_n)) *s_origin = none_expr();
+                t_n = whnf_core(*b_t, false, true);
+                s_n = whnf_core(*b_s, false, true);
+            } else {
+                t_n = whnf_core(*unfold_definition(t_n), false, true);
+                s_n = whnf_core(*unfold_definition(s_n), false, true);
+            }
         }
     }
     switch (quick_is_def_eq(t_n, s_n)) {
@@ -1449,7 +1556,7 @@ lbool type_checker::lazy_delta_reduction(expr & t_n, expr & s_n, optional<expr> 
             }
         }
 
-        switch (lazy_delta_reduction_step(t_n, s_n)) {
+        switch (lazy_delta_reduction_step(t_n, s_n, &t_origin, &s_origin)) {
         case reduction_status::Continue:   break;
         case reduction_status::DefUnknown: return l_undef;
         case reduction_status::DefEqual:   return l_true;

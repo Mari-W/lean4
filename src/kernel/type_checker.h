@@ -71,6 +71,8 @@ private:
     unsigned                  m_rewrite_fires = 0;
     unsigned                  m_rewrite_total = 0;
     unsigned                  m_rewrite_depth = 0;
+    /* Set while rules marked `@[rewrite ↓]` match: no argument is reduced. */
+    bool                      m_rewrite_syntactic = false;
     friend class rewrite_fuel_scope;
     /* Whether this checker reads and publishes the cache across declarations (`enable_shared_cache`). */
     bool                      m_shared = false;
@@ -98,11 +100,14 @@ private:
     bool match_rewrite_pattern(rewrite_rule const & rule, expr const & p, expr const & t, buffer<expr> & subst,
                                buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks);
     optional<expr> reduce_rewrite_step(expr const & e, bool stuck = false);
+    optional<expr> fire_first_rule(std::vector<rewrite_rule> const & rules, expr const & f, buffer<expr> const & args);
+    optional<expr> reduce_before_delta(expr const & e);
+    void unfold_lazy(expr & e, optional<expr> * origin, bool rules);
     void check_rewrite_args(rewrite_rule const & rule, levels const & us, buffer<expr> const & subst);
     optional<expr> reduce_rewrite(expr const & e, bool stuck = false);
     bool is_stuck_result(expr const & e);
     void note_rewrite_origin(expr const & e, optional<expr> & origin);
-    bool rule_head_unfolds(rewrite_head const & h, expr const & f) const;
+    bool rule_head_unfolds(optional<constant_info> const & info, expr const & f) const;
     optional<expr> reduce_proj_core(expr c, name const & sname, unsigned idx);
     optional<expr> reduce_proj(expr const & e, bool cheap_rec, bool cheap_proj);
     expr whnf_fvar(expr const & e, bool cheap_rec, bool cheap_proj);
@@ -132,7 +137,8 @@ private:
     void cache_failure(expr const & t, expr const & s);
     bool succeeded_before(expr const & t, expr const & s) const;
     void cache_success(expr const & t, expr const & s);
-    reduction_status lazy_delta_reduction_step(expr & t_n, expr & s_n);
+    reduction_status lazy_delta_reduction_step(expr & t_n, expr & s_n, optional<expr> * t_origin = nullptr,
+                                               optional<expr> * s_origin = nullptr);
     lbool lazy_delta_reduction(expr & t_n, expr & s_n, optional<expr> & t_origin, optional<expr> & s_origin);
     bool lazy_delta_proj_reduction(expr & t_n, expr & s_n, name const & sname, nat const & idx);
     bool is_def_eq_core(expr const & t, expr const & s);

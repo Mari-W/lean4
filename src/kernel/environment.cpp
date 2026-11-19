@@ -36,7 +36,8 @@ extern "C" object* lean_kernel_close_rewrite_set_from(object*, object*, object*)
 extern "C" uint8 lean_kernel_rewrite_set_is_full(object*, object*);
 extern "C" object* lean_kernel_rewrite_rules_map(object*);
 extern "C" object* lean_kernel_set_rewrite_set(object*, object*, object*);
-extern "C" object* lean_kernel_register_rewrite(object*, object*, object*, object*);
+extern "C" object* lean_kernel_register_rewrite(object*, object*, object*, object*, uint8_t, object*, object*);
+extern "C" uint8_t lean_kernel_rewrite_before_delta(object*, object*);
 extern "C" object* lean_kernel_rewrite_prio(object*, object*);
 extern "C" object* lean_kernel_blocked_abstracts(object*, object*);
 
@@ -505,22 +506,29 @@ environment environment::set_rewrite_set(name const & n, array_ref<name> const &
     return environment(lean_kernel_set_rewrite_set(to_obj_arg(), n.to_obj_arg(), s.to_obj_arg()));
 }
 
-environment environment::register_rewrite_rule(name const & thm, name const & head, nat const & prio) const {
-    return environment(lean_kernel_register_rewrite(to_obj_arg(), thm.to_obj_arg(), head.to_obj_arg(), prio.to_obj_arg()));
+environment environment::register_rewrite_rule(name const & thm, name const & head, nat const & prio, bool before_delta,
+                                               nat const & key_arg, name const & key_const) const {
+    return environment(lean_kernel_register_rewrite(to_obj_arg(), thm.to_obj_arg(), head.to_obj_arg(), prio.to_obj_arg(),
+                                                    before_delta, key_arg.to_obj_arg(), key_const.to_obj_arg()));
+}
+
+bool environment::get_rewrite_before_delta(name const & thm) const {
+    return lean_kernel_rewrite_before_delta(to_obj_arg(), thm.to_obj_arg()) != 0;
 }
 
 nat environment::get_rewrite_prio(name const & thm) const {
     return nat(lean_kernel_rewrite_prio(to_obj_arg(), thm.to_obj_arg()));
 }
 
-environment environment::add_rewrite_rule(name const & thm, nat const & prio) const {
+environment environment::add_rewrite_rule(name const & thm, nat const & prio, bool before_delta) const {
     constant_info info = get(thm);
     if (!info.is_theorem())
         throw kernel_exception(*this, sstream() << "invalid rewrite rule '" << thm << "', it is not a theorem");
     if (get_rewrite_head(thm))
         throw kernel_exception(*this, sstream() << "'" << thm << "' is already a rewrite rule");
     rewrite_rule r = read_rewrite_rule(*this, thm);
-    return register_rewrite_rule(thm, r.m_head, prio);
+    return register_rewrite_rule(thm, r.m_head, prio, before_delta,
+                                 nat(r.m_key_pos == UINT_MAX ? 0u : r.m_key_pos + 1), r.m_key_const);
 }
 
 /*
@@ -543,10 +551,11 @@ extern "C" LEAN_EXPORT object * lean_add_decl_without_checking(object * env, obj
         });
 }
 
-/* addRewriteRule (env : Environment) (thm : @& Name) (prio : @& Nat) : Except Kernel.Exception Environment */
-extern "C" LEAN_EXPORT object * lean_add_rewrite_rule(object * env, object * thm, object * prio) {
+/* addRewriteRule (env : Environment) (thm : @& Name) (prio : @& Nat) (beforeDelta : Bool) :
+     Except Kernel.Exception Environment */
+extern "C" LEAN_EXPORT object * lean_add_rewrite_rule(object * env, object * thm, object * prio, uint8_t before_delta) {
     return catch_kernel_exceptions<environment>([&]() {
-            return environment(env).add_rewrite_rule(name(thm, true), nat(prio, true));
+            return environment(env).add_rewrite_rule(name(thm, true), nat(prio, true), before_delta != 0);
         });
 }
 

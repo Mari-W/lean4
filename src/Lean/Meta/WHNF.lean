@@ -631,6 +631,8 @@ private structure RewriteMatch where
   args   : Array (Option Expr)
   lvls   : Array (Option Level)
   checks : Array (Level × Level) := #[]
+  /-- Match without reducing any argument, for rules that fire before unfolding. -/
+  syntactic : Bool := false
 
 private def matchRewriteLevels (rule : RewriteRuleInfo) (ps ls : List Level) :
     StateT RewriteMatch MetaM Bool := do
@@ -665,13 +667,15 @@ private partial def matchRewritePattern (rule : RewriteRuleInfo) (p t : Expr) :
   if let .bvar i := p then
     let k := rule.numVars - 1 - i
     if let some (some t₀) := (← get).args[k]? then
-      return t₀ == t || (← isDefEq t₀ t)
+      return t₀ == t || (!(← get).syntactic && (← isDefEq t₀ t))
     modify fun s => { s with args := s.args.set! k (some t) }
     return true
   let s₀ ← get
   if (← matchRewriteApp rule p t) then
     return true
   set s₀
+  if s₀.syntactic then
+    return false
   let t' ← (← whnf t).toCtorIfLit
   if t' == t then
     return false
@@ -686,24 +690,10 @@ private def levelParamsBound (rule : RewriteRuleInfo) (lvls : Array (Option Leve
   | .max a b | .imax a b => levelParamsBound rule lvls a && levelParamsBound rule lvls b
   | _ => true
 
-/--
-Fires the first active rewrite rule (`getActiveRewriteRules`) whose left-hand side matches a prefix
-of the application `e`. The rules of a head are tried by priority, highest first, then by
-`Name.cmp`, as in the kernel.
--/
-def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
-  let .const f us := e.getAppFn | return none
+/-- Fires the first rule of `cands` whose left-hand side matches a prefix of the application `e`. -/
+private def fireFirstRewrite (e : Expr) (us : List Level) (cands : Array RewriteRule) (syntactic : Bool) :
+    MetaM (Option Expr) := do
   let env ← getEnv
-  let registered := env.rewriteRulesFor f
-  if registered.isEmpty then
-    return none
-  -- as in the kernel, a rule on a head that unfolds fires only when its unfolding got stuck
-  if !stuck && (env.find? f).any (·.hasValue) && !env.isAbstract f then
-    return none
-  let active ← getActiveRewriteRules
-  let cands := registered.filterMap fun h =>
-    if active.binSearchContains h (fun a b => a.quickCmp b == .lt) then env.rewriteRule? h else none
-  let cands := cands.qsort fun a b => a.prio > b.prio || (a.prio == b.prio && a.thm.cmp b.thm == .lt)
   let args := e.getAppArgs
   for cand in cands do
     let some rule := getRewriteRuleInfo? env cand.thm | continue
@@ -712,7 +702,7 @@ def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
     if args.size < pargs.size then
       continue
     let init : RewriteMatch :=
-      { args := .replicate rule.numVars none, lvls := .replicate rule.levelParams.length none }
+      { args := .replicate rule.numVars none, lvls := .replicate rule.levelParams.length none, syntactic }
     let go : StateT RewriteMatch MetaM Bool := do
       unless (← matchRewriteLevels rule ps us) do
         return false
@@ -737,6 +727,46 @@ def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
     let rhs := (rule.rhs.instantiateLevelParams rule.levelParams ls).instantiateRev substs
     return some (mkAppN rhs (args.extract pargs.size args.size))
   return none
+
+
+/-- The rules of `rules` in force (`getActiveRewriteRules`), in firing order. -/
+private def activeRewriteRules (rules : Array RewriteRule) : MetaM (Array RewriteRule) := do
+  let active ← getActiveRewriteRules
+  let cands := rules.filter fun r => active.binSearchContains r.thm (fun a b => a.quickCmp b == .lt)
+  return cands.qsort fun a b => a.prio > b.prio || (a.prio == b.prio && a.thm.cmp b.thm == .lt)
+
+/--
+Fires the first active rewrite rule (`getActiveRewriteRules`) whose left-hand side matches a prefix
+of the application `e`. The rules of a head are tried by priority, highest first, then by
+`Name.cmp`, as in the kernel.
+-/
+def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
+  let .const f us := e.getAppFn | return none
+  let env ← getEnv
+  let registered := env.rewriteRulesFor f
+  if registered.isEmpty then
+    return none
+  -- as in the kernel, a rule on a head that unfolds fires only when its unfolding got stuck
+  if !stuck && (env.find? f).any (·.hasValue) && !env.isAbstract f then
+    return none
+  fireFirstRewrite e us (← activeRewriteRules (registered.filterMap env.rewriteRule?)) false
+
+/--
+Fires a rule marked `@[rewrite ↓]` on `e`, whose head the caller is about to unfold, as the kernel's
+`reduce_before_delta` does: one test without such rules, one lookup for a head without them, and a
+comparison of the argument at each rule's key position (`RewriteRule.keyArg`) before any matching.
+These rules match without reducing any argument.
+-/
+def reduceRewriteBeforeDelta? (e : Expr) : MetaM (Option Expr) := do
+  let env ← getEnv
+  unless env.hasPreRewriteRules do return none
+  let .const f us := e.getAppFn | return none
+  let some rules := env.preRewriteRulesFor? f | return none
+  let args := e.getAppArgs
+  let hits := rules.filter fun r =>
+    r.keyArg == 0 || (args[r.keyArg - 1]?.any fun a => a.getAppFn.isConstOf r.keyConst)
+  if hits.isEmpty then return none
+  fireFirstRewrite e us (← activeRewriteRules hits) true
 
 /--
 Fires rewrite rules at the head of `e` as long as one matches (`reduceRewriteStep?`). Iterating
@@ -1239,6 +1269,9 @@ partial def whnfImp (e : Expr) : MetaM Expr :=
         | none   =>
           match (← unfoldDefinition? e') with
           | some e'' =>
+            -- a rule marked `@[rewrite ↓]` fires instead of the unfolding
+            if let some e''' ← withRewriteFuel (reduceRewriteBeforeDelta? e') then
+              return ← cache useCache e (← whnfImp e''')
             let r ← whnfImp e''
             -- the unfolding of a head with rules got stuck, so its rules get their turn
             if (← isStuckRewriteOrigin e' r) then

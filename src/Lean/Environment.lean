@@ -107,11 +107,20 @@ instance : Nonempty EnvExtensionEntry := EnvExtensionEntrySpec.property
 /--
 A user rewrite rule: the theorem `thm : ∀ xs, l = r`, the head constant `head` of `l`, and the
 priority `prio`. The rules of a head fire in order of priority, highest first, then by `Name.cmp`.
+A rule with `beforeDelta` (`@[rewrite ↓]`) fires before its head is unfolded. Any other rule on a
+head that unfolds fires only where the unfolding gets stuck. The kernel computes the key at
+registration: `keyArg = i + 1` if argument `i` of the left side has the constant head `keyConst`
+(the first such argument in an instance-implicit position of the head, else the first such
+argument), and `keyArg = 0` if no argument has one. A rule that fires before unfolding is tried
+only on terms whose argument `i` has the head `keyConst`.
 -/
 structure RewriteRule where
   thm  : Name
   head : Name
   prio : Nat
+  beforeDelta : Bool := false
+  keyArg : Nat := 0
+  keyConst : Name := .anonymous
   deriving Inhabited, BEq, Repr
 
 /-- The rewrite rules and rule sets of a module, as stored in its `.olean` file. -/
@@ -244,6 +253,10 @@ structure Rewrites where
   abstracts : SMap Name (Array Name) := SMap.empty.switch
   /-- Abstract definitions registered since the import, in registration order. -/
   newAbstracts : Array (Name × Array Name) := #[]
+  /-- The rules that fire before unfolding (`beforeDelta`), by head constant, for the elaborator. -/
+  preByHead : SMap Name (Array RewriteRule) := SMap.empty.switch
+  /-- Whether any rule fires before unfolding. -/
+  hasPre : Bool := false
   deriving Inhabited
 
 /-- Sorts a rule set by `Name.quickCmp` and removes duplicates. The order carries no meaning: each
@@ -398,10 +411,12 @@ opaque addDeclWithoutChecking (env : Environment) (decl : @& Declaration) (rules
 /--
 Registers the stored theorem `thm : ∀ xs, l = r` as a rewrite rule. The kernel checks that `l` is a
 constant outside the basis (`Nat`, `Eq`, `False`, `Quot`) applied to first-order linear patterns
-that bind every variable of `xs`, and that the level parameters of `r` occur in `l`.
+that bind every variable of `xs`, and that the level parameters of `r` occur in `l`. With
+`beforeDelta` the rule fires before its head is unfolded.
 -/
 @[extern "lean_add_rewrite_rule"]
-opaque addRewriteRule (env : Environment) (thm : @& Name) (prio : @& Nat := 1000) : Except Exception Environment
+opaque addRewriteRule (env : Environment) (thm : @& Name) (prio : @& Nat := 1000) (beforeDelta : Bool := false) :
+  Except Exception Environment
 
 @[export lean_kernel_has_rewrite_rules]
 def hasRewriteRules (env : Environment) : Bool :=
@@ -424,6 +439,11 @@ def rewriteRulesFor (env : Environment) (head : Name) : Array Name :=
 @[export lean_kernel_rewrite_prio]
 def rewritePrio (env : Environment) (thm : Name) : Nat :=
   env.rewriteRule? thm |>.map (·.prio) |>.getD 0
+
+/-- Whether the registered rewrite rule `thm` fires before its head is unfolded. -/
+@[export lean_kernel_rewrite_before_delta]
+def rewriteBeforeDelta (env : Environment) (thm : Name) : Bool :=
+  env.rewriteRule? thm |>.any (·.beforeDelta)
 
 /-- The rule set `R(n)` the declaration `n` was checked under. -/
 @[export lean_kernel_rewrite_set]
@@ -514,13 +534,18 @@ private def setRewriteSet (env : Environment) (n : Name) (set : Array Name) : En
     { env with rewrites := { rw with sets := rw.sets.insert n set, interned, lastSet := set } }
 
 @[export lean_kernel_register_rewrite]
-private def registerRewrite (env : Environment) (thm head : Name) (prio : Nat) : Environment :=
-  let rule := { thm, head, prio }
-  { env with rewrites := { env.rewrites with
-      rules    := env.rewrites.rules.insert thm rule
-      byHead   := env.rewrites.byHead.insert head (env.rewriteRulesFor head |>.push thm)
-      numRules := env.rewrites.numRules + 1
-      newRules := env.rewrites.newRules.push rule } }
+private def registerRewrite (env : Environment) (thm head : Name) (prio : Nat) (beforeDelta : Bool)
+    (keyArg : Nat) (keyConst : Name) : Environment :=
+  let rule := { thm, head, prio, beforeDelta, keyArg, keyConst }
+  let rw := env.rewrites
+  { env with rewrites := { rw with
+      rules    := rw.rules.insert thm rule
+      byHead   := rw.byHead.insert head (env.rewriteRulesFor head |>.push thm)
+      numRules := rw.numRules + 1
+      newRules := rw.newRules.push rule
+      preByHead := if beforeDelta then rw.preByHead.insert head ((rw.preByHead.findD head #[]).push rule)
+        else rw.preByHead
+      hasPre := rw.hasPre || beforeDelta } }
 
 /-- The declarations that may unfold the abstract definition `c`, if `c` is abstract. -/
 def abstractMembers? (env : Environment) (c : Name) : Option (Array Name) :=
@@ -1134,6 +1159,14 @@ def rewriteHead? (env : Environment) (thm : Name) : Option Name :=
 def rewriteRulesFor (env : Environment) (head : Name) : Array Name :=
   env.base.private.rewriteRulesFor head
 
+/-- Whether any rule fires before unfolding (`@[rewrite ↓]`). -/
+def hasPreRewriteRules (env : Environment) : Bool :=
+  env.base.private.rewrites.hasPre
+
+/-- The registered rules of `head` that fire before unfolding. -/
+def preRewriteRulesFor? (env : Environment) (head : Name) : Option (Array RewriteRule) :=
+  env.base.private.rewrites.preByHead.find? head
+
 @[inherit_doc Kernel.Environment.rewriteSet]
 def rewriteSet (env : Environment) (n : Name) : Array Name :=
   env.base.private.rewriteSet n
@@ -1180,12 +1213,12 @@ def kernelRewriteSet (env : Environment) (n : Name) : Array Name :=
 Registers the theorem `thm` as a rewrite rule, see `Kernel.Environment.addRewriteRule`. Waits for
 all prior declarations to be checked.
 -/
-def addRewriteRule (env : Environment) (thm : Name) (prio : Nat := 1000) :
+def addRewriteRule (env : Environment) (thm : Name) (prio : Nat := 1000) (beforeDelta := false) :
     Except Kernel.Exception Environment := do
-  let kenv ← env.toKernelEnv.addRewriteRule thm prio
+  let kenv ← env.toKernelEnv.addRewriteRule thm prio beforeDelta
   let some rule := kenv.rewriteRule? thm
     | throw <| .other s!"rewrite rule '{thm}' was not registered"
-  return env.modifyCheckedAsync (·.registerRewrite thm rule.head rule.prio)
+  return env.modifyCheckedAsync (·.registerRewrite thm rule.head rule.prio rule.beforeDelta rule.keyArg rule.keyConst)
 
 @[inherit_doc Kernel.Environment.const2ModIdx]
 def const2ModIdx (env : Environment) : Std.HashMap Name ModuleIdx :=
@@ -3008,6 +3041,7 @@ def Kernel.Rewrites.ofModuleData (mods : Array ModuleData) : Kernel.Rewrites := 
   let mut sets : Std.HashMap Name (Array Name) := {}
   let mut interned : Std.HashMap (Array Name) (Array Name) := {}
   let mut abstracts : Std.HashMap Name (Array Name) := {}
+  let mut preByHead : Std.HashMap Name (Array RewriteRule) := {}
   for data in mods do
     for (c, members) in data.rewrites.abstracts do
       abstracts := abstracts.insert c members
@@ -3015,6 +3049,8 @@ def Kernel.Rewrites.ofModuleData (mods : Array ModuleData) : Kernel.Rewrites := 
       unless rules.contains r.thm do
         rules := rules.insert r.thm r
         byHead := byHead.insert r.head ((byHead.getD r.head #[]).push r.thm)
+        if r.beforeDelta then
+          preByHead := preByHead.insert r.head ((preByHead.getD r.head #[]).push r)
     for i in data.rewrites.declIdx, k in data.rewrites.declSet do
       let some n := data.constNames[i]? | continue
       let some set := data.rewrites.sets[k]? | continue
@@ -3028,6 +3064,8 @@ def Kernel.Rewrites.ofModuleData (mods : Array ModuleData) : Kernel.Rewrites := 
     numRules := rules.size
     interned := interned.fold (init := ({} : PersistentHashMap (Array Name) (Array Name))) fun m k v => m.insert k v
     abstracts := SMap.fromHashMap abstracts false
+    preByHead := SMap.fromHashMap preByHead false
+    hasPre := !preByHead.isEmpty
   }
 
 /--
