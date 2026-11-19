@@ -64,6 +64,9 @@ private:
     names const *             m_lparams;
     /* The rules this checker fires, from the rule set `R(D)` it checks under. */
     rewrite_rule_table        m_rules;
+    /* The abstract definitions this declaration may not unfold, computed on first use. */
+    mutable optional<name_set> m_abstract_blocked;
+    bool is_abstract_blocked(name const & n) const;
     /* Rule firings since the outermost active `whnf`/`whnf_core` call, and the nesting depth of those calls. */
     unsigned                  m_rewrite_fires = 0;
     unsigned                  m_rewrite_total = 0;

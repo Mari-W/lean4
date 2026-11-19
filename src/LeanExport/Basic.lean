@@ -280,6 +280,13 @@ public partial def dumpConstant (c : Name) : M Unit := do
         ("all", ← dumpNames val.all)
       ] : List (String × Json)) ++ (← dumpRuleSet c))
     ]
+    if let some members := (← read).env.toKernelEnv.abstractMembers? val.name then
+      dumpObj [
+        ("abstract", Json.mkObj [
+          ("name", ← dumpName val.name),
+          ("members", ← dumpNames members.toList)
+        ])
+      ]
   | .opaqueInfo val => do
     dumpDeps val.type
     dumpDeps val.value

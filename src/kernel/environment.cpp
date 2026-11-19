@@ -12,6 +12,7 @@ Author: Leonardo de Moura
 #include "runtime/sharecommon.h"
 #include "util/io.h"
 #include "kernel/environment.h"
+#include "runtime/flet.h"
 #include "kernel/kernel_exception.h"
 #include "kernel/type_checker.h"
 #include "kernel/quot.h"
@@ -34,6 +35,7 @@ extern "C" object* lean_kernel_close_rewrite_set(object*, object*, object*);
 extern "C" object* lean_kernel_set_rewrite_set(object*, object*, object*);
 extern "C" object* lean_kernel_register_rewrite(object*, object*, object*, object*);
 extern "C" object* lean_kernel_rewrite_prio(object*, object*);
+extern "C" object* lean_kernel_blocked_abstracts(object*, object*);
 
 void diagnostics::record_unfold(name const & decl_name) {
     m_obj = lean_kernel_record_unfold(m_obj, decl_name.to_obj_arg());
@@ -365,9 +367,36 @@ static void get_added_names(environment const & old_env, environment const & new
     }
 }
 
+static thread_local name const * g_current_decl = nullptr;
+
+name const & current_declaration_name() {
+    static name anonymous;
+    return g_current_decl ? *g_current_decl : anonymous;
+}
+
+static name decl_main_name(declaration const & d) {
+    switch (d.kind()) {
+    case declaration_kind::Axiom:            return d.to_axiom_val().get_name();
+    case declaration_kind::Definition:       return d.to_definition_val().get_name();
+    case declaration_kind::Theorem:          return d.to_theorem_val().get_name();
+    case declaration_kind::Opaque:           return d.to_opaque_val().get_name();
+    case declaration_kind::MutualDefinition: return head(d.to_definition_vals()).get_name();
+    case declaration_kind::Inductive:        return head(inductive_decl(d).get_types()).get_name();
+    case declaration_kind::Quot:             break;
+    }
+    return name();
+}
+
+array_ref<name> environment::get_blocked_abstracts(name const & decl) const {
+    return array_ref<name>(lean_kernel_blocked_abstracts(to_obj_arg(), decl.to_obj_arg()));
+}
+
 environment environment::add(declaration const & d, bool check, array_ref<name> const & explicit_rules) const {
     if (d.kind() == declaration_kind::Quot)
         return add_quot();
+    /* abstract definitions unfold only while checking a member of their block */
+    name decl_name = decl_main_name(d);
+    flet<name const *> set_decl(g_current_decl, &decl_name);
     for (name const & h : explicit_rules) {
         if (!get_rewrite_head(h))
             throw kernel_exception(*this, sstream() << "unknown rewrite rule '" << h << "'");
@@ -474,8 +503,36 @@ extern "C" LEAN_EXPORT object * lean_add_rewrite_rule(object * env, object * thm
 /* ModuleData.withRewrites (d : ModuleData) (empty : ModuleRewrite) : ModuleData
 
    A `ModuleData` written by a Lean without rewrite rules has five object fields and no `rewrites`.
-   It gets `empty` as its sixth field, so the import reads it like a module without rules. */
+   It gets `empty` as its sixth field, so the import reads it like a module without rules. A
+   `ModuleRewrite` written before abstract definitions has four fields and gets the empty fifth. */
 extern "C" LEAN_EXPORT object * lean_module_data_with_rewrites(object * d, object * empty) {
+    if (lean_ctor_num_objs(d) == 6) {
+        object * rw = lean_ctor_get(d, 5);
+        if (lean_ctor_num_objs(rw) != 4) {
+            lean_dec(empty);
+            return d;
+        }
+        object * nrw = lean_alloc_ctor(0, 5, 0);
+        for (unsigned i = 0; i < 4; i++) {
+            object * f = lean_ctor_get(rw, i);
+            lean_inc(f);
+            lean_ctor_set(nrw, i, f);
+        }
+        object * abstracts = lean_ctor_get(empty, 4);
+        lean_inc(abstracts);
+        lean_ctor_set(nrw, 4, abstracts);
+        lean_dec(empty);
+        object * r = lean_alloc_ctor(0, 6, sizeof(uint8_t));
+        for (unsigned i = 0; i < 5; i++) {
+            object * f = lean_ctor_get(d, i);
+            lean_inc(f);
+            lean_ctor_set(r, i, f);
+        }
+        lean_ctor_set(r, 5, nrw);
+        lean_ctor_set_uint8(r, 6 * sizeof(void *), lean_ctor_get_uint8(d, 6 * sizeof(void *)));
+        lean_dec(d);
+        return r;
+    }
     if (lean_ctor_num_objs(d) != 5) {
         lean_dec(empty);
         return d;

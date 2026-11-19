@@ -29,6 +29,8 @@ public structure ExportedEnv where
   constOrder : Array Lean.Name
   /-- The `rewrite` lines: rule theorem, head constant and priority, in order. -/
   rewrites : Array (Lean.Name × Lean.Name × Nat) := #[]
+  /-- The `abstract` lines: an abstract definition and the declarations that may unfold it. -/
+  abstracts : Array (Lean.Name × Array Lean.Name) := #[]
   deriving Inhabited
 
 namespace Parse
@@ -45,6 +47,7 @@ structure State where
   constMap : Std.HashMap Lean.Name Lean.ConstantInfo := {}
   constOrder : Array Lean.Name := #[]
   rewrites : Array (Lean.Name × Lean.Name × Nat) := #[]
+  abstracts : Array (Lean.Name × Array Lean.Name) := #[]
 
 abbrev M := StateT State <| IO
 
@@ -283,6 +286,15 @@ def parseRewrite (data : Std.TreeMap.Raw String Json) : M Unit := do
     fail s!"rewrite rule {name} before its theorem"
   modify fun s => { s with rewrites := s.rewrites.push (name, head, prio) }
 
+def parseAbstract (data : Std.TreeMap.Raw String Json) : M Unit := do
+  let some (.num (nameIdx : Nat)) := data["name"]? | fail s!"abstract invalid"
+  let some (.arr memberIdxs) := data["members"]? | fail s!"abstract invalid"
+  let name ← getName nameIdx
+  let members ← getNameList memberIdxs
+  unless (← get).constMap.contains name do
+    fail s!"abstract definition {name} before its definition"
+  modify fun s => { s with abstracts := s.abstracts.push (name, members.toArray) }
+
 def parseDefnInfo (data : Std.TreeMap.Raw String Json) : M Unit := do
   let some (.num (nameIdx : Nat)) := data["name"]? | fail s!"defnInfo invalid"
   let some (.arr levelParamsIdxs) := data["levelParams"]? | fail s!"defnInfo invalid"
@@ -511,6 +523,7 @@ def parseItem (line : String) : M Unit := do
   | [("quot", .obj data)] => parseQuotInfo data
   | [("inductive", .obj data)] => parseInductive data
   | [("rewrite", .obj data)] => parseRewrite data
+  | [("abstract", .obj data)] => parseAbstract data
   | _ => fail s!"Unknown export object with keys {obj.keys}"
 
 partial def parseItems : M Unit :=
@@ -533,11 +546,12 @@ end Parse
 
 public def parseStream (stream : IO.FS.Stream) : IO ExportedEnv := do
   let (_, state) ← Parse.M.run Parse.parseFile stream
-  let { constMap, constOrder, rewrites, .. } := state
+  let { constMap, constOrder, rewrites, abstracts, .. } := state
   return {
     constMap,
     constOrder,
     rewrites,
+    abstracts,
   }
 
 -- We cannot turn pure Strings into Streams?

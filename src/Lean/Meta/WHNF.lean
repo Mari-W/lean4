@@ -686,11 +686,14 @@ Fires the first active rewrite rule (`getActiveRewriteRules`) whose left-hand si
 of the application `e`. The rules of a head are tried by priority, highest first, then by
 `Name.cmp`, as in the kernel.
 -/
-def reduceRewriteStep? (e : Expr) : MetaM (Option Expr) := do
+def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
   let .const f us := e.getAppFn | return none
   let env ← getEnv
   let registered := env.rewriteRulesFor f
   if registered.isEmpty then
+    return none
+  -- as in the kernel, a rule on a head that unfolds fires only when its unfolding got stuck
+  if !stuck && (env.find? f).any (·.hasValue) && !env.isAbstract f then
     return none
   let active ← getActiveRewriteRules
   let cands := registered.filterMap fun h =>
@@ -734,8 +737,8 @@ def reduceRewriteStep? (e : Expr) : MetaM (Option Expr) := do
 Fires rewrite rules at the head of `e` as long as one matches (`reduceRewriteStep?`). Iterating
 here keeps a cycle of rules from nesting `whnfCore` calls, so the firing budget stops it.
 -/
-partial def reduceRewrite? (e : Expr) : MetaM (Option Expr) := do
-  let some e' ← reduceRewriteStep? e | return none
+partial def reduceRewrite? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
+  let some e' ← reduceRewriteStep? e stuck | return none
   let rec loop (e : Expr) : MetaM Expr := do
     match (← reduceRewriteStep? e) with
     | some e' => loop e'
@@ -1205,6 +1208,16 @@ private def cache (useCache : Bool) (e r : Expr) : MetaM Expr := do
     modify fun s => { s with cache.whnf := s.cache.whnf.insert key r }
   return r
 
+/-- Whether `e` has a head with rewrite rules and its unfolding `r` ended stuck rather than in a value. -/
+def isStuckRewriteOrigin (e r : Expr) : MetaM Bool := do
+  let .const f _ := e.getAppFn | return false
+  if ((← getEnv).rewriteRulesFor f).isEmpty then return false
+  match r with
+  | .lam .. | .forallE .. | .sort _ | .lit _ => return false
+  | _ =>
+    let .const g _ := r.getAppFn | return true
+    return !((← getEnv).find? g matches some (.ctorInfo _))
+
 set_option compiler.ignoreBorrowAnnotation true in
 @[export lean_whnf]
 partial def whnfImp (e : Expr) : MetaM Expr :=
@@ -1220,8 +1233,19 @@ partial def whnfImp (e : Expr) : MetaM Expr :=
         | some v => cache useCache e v
         | none   =>
           match (← unfoldDefinition? e') with
-          | some e'' => cache useCache e (← whnfImp e'')
-          | none => cache useCache e e'
+          | some e'' =>
+            let r ← whnfImp e''
+            -- the unfolding of a head with rules got stuck, so its rules get their turn
+            if (← isStuckRewriteOrigin e' r) then
+              if let some e''' ← reduceRewrite? e' (stuck := true) then
+                return ← cache useCache e (← whnfImp e''')
+            cache useCache e r
+          | none =>
+            -- smart unfolding refuses to unfold a definition whose match is stuck, which counts as stuck too
+            if let some e''' ← reduceRewrite? e' (stuck := true) then
+              cache useCache e (← whnfImp e''')
+            else
+              cache useCache e e'
 
 /-- If `e` is a projection function that satisfies `p`, then reduce it -/
 def reduceProjOf? (e : Expr) (p : Name → Bool) : MetaM (Option Expr) := do

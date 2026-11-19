@@ -59,7 +59,8 @@ def throwKernelException (ex : Kernel.Exception) : M Unit := do
 
 /--
 Add a declaration under the rule set the source checked `name` under, possibly throwing a
-`Kernel.Exception`. If `name` is a rewrite rule of the source, register it.
+`Kernel.Exception`. If `name` is a rewrite rule or an abstract definition of the source, register
+it.
 -/
 def addDecl (name : Name) (d : Declaration) : M Unit := do
   let rules := (← read).rewrites.sets.findD name #[]
@@ -68,6 +69,11 @@ def addDecl (name : Name) (d : Declaration) : M Unit := do
   | .error ex => throwKernelException ex
   if let some rule := (← read).rewrites.rules.find? name then
     match (← get).env.addRewriteRule name rule.prio with
+    | .ok env => modify fun s => { s with env := env }
+    | .error ex => throwKernelException ex
+  -- an abstract definition carries its members, so registering it right away is faithful
+  if let some members := (← read).rewrites.abstracts.find? name then
+    match (← get).env.addAbstract name members with
     | .ok env => modify fun s => { s with env := env }
     | .error ex => throwKernelException ex
 

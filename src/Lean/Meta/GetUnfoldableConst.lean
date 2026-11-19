@@ -79,7 +79,10 @@ def getUnfoldableConst? (constName : Name) : MetaM (Option ConstantInfo) := do
   let some ainfo := (← getEnv).findAsync? constName | throwUnknownConstantAt (← getRef) constName
   match ainfo.kind with
   | .thm => return none
-  | .defn => if (← canUnfold ainfo.toConstantInfo) then return ainfo.toConstantInfo else return none
+  | .defn =>
+    -- an abstract definition never unfolds outside its block, as in the kernel
+    if (← getEnv).isAbstract constName then return none
+    if (← canUnfold ainfo.toConstantInfo) then return ainfo.toConstantInfo else return none
   | _ => return none
 
 /--
@@ -88,7 +91,9 @@ As with `getUnfoldableConst?` but return `none` instead of failing if the consta
 def getUnfoldableConstNoEx? (constName : Name) : MetaM (Option ConstantInfo) := do
   match (← getEnv).find? constName with
   | some (.thmInfo _)          => return none
-  | some (info@(.defnInfo _)) => if (← canUnfold info) then return info else return none
+  | some (info@(.defnInfo _)) =>
+    if (← getEnv).isAbstract constName then return none
+    if (← canUnfold info) then return info else return none
   | some (.axiomInfo _)       => recordUnfoldAxiom constName; return none
   | _                         => return none
 

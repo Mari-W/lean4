@@ -537,6 +537,23 @@ def failIfSucceeds (x : CommandElabM Unit) : CommandElabM Unit := do
       throwErrorAt id "`{.ofConstName thm}` is not a rewrite rule, register it with `@[rewrite]`"
     rewriteScopeExt.add thm .local
 
+@[builtin_command_elab Parser.Command.abstractBlock] def elabAbstractBlock : CommandElab := fun stx => do
+  let before ← getEnv
+  -- checked synchronously, so that every member exists when the block ends
+  withScope (fun scope => { scope with opts := Elab.async.set scope.opts false }) do
+    for cmd in stx[1].getArgs do
+      elabCommand cmd
+  let env ← getEnv
+  let members := env.constants.map₂.foldl (fun acc n _ => if before.contains n then acc else acc.push n) #[]
+  let defs := members.filter fun n =>
+    (env.find? n matches some (.defnInfo _)) && !n.isInternal && !Meta.isMatcherCore env n
+  if defs.isEmpty then
+    throwError "`abstract_block` declares no definition"
+  for c in defs do
+    match (← getEnv).addAbstract c members with
+    | .ok env => setEnv env
+    | .error ex => throwError ex.toMessageData (← getOptions)
+
 open Lean.Parser.Command.InternalSyntax in
 @[builtin_macro Lean.Parser.Command.«in»] def expandInCmd : Macro
   | `($cmd₁ in%$tk $cmd₂) =>

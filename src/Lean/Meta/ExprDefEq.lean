@@ -2484,9 +2484,32 @@ private def whnfCoreAtDefEq (e : Expr) : MetaM Expr := do
   else
     whnfCore e
 
+/-- Whether the head of `e` is a constant with registered rewrite rules. -/
+private def hasRewriteHead (e : Expr) : MetaM Bool := do
+  let .const f _ := e.getAppFn | return false
+  return !((← getEnv).rewriteRulesFor f).isEmpty
+
+/--
+Rules come last, as in the kernel. After `t =?= s` failed, a side whose head has rules is reduced
+with `whnf`, which fires a rule where unfolding gets stuck. Only if a rule fired, compare again.
+-/
+private def isDefEqRulesLast (t s : Expr) : MetaM Bool := do
+  unless (← getEnv).hasRewriteRules do return false
+  unless (← hasRewriteHead t) || (← hasRewriteHead s) do return false
+  let before := (← get).rewriteTotal
+  let t' ← whnf t
+  let s' ← whnf s
+  if (← get).rewriteTotal == before then return false
+  Meta.isExprDefEqAux t' s'
+
 set_option compiler.ignoreBorrowAnnotation true in
+mutual
 @[export lean_is_expr_def_eq]
-partial def isExprDefEqAuxImpl (t : Expr) (s : Expr) : MetaM Bool := withIncRecDepth do
+partial def isExprDefEqAuxImpl (t : Expr) (s : Expr) : MetaM Bool := do
+  if (← isExprDefEqAuxCore t s) then return true
+  isDefEqRulesLast t s
+
+private partial def isExprDefEqAuxCore (t : Expr) (s : Expr) : MetaM Bool := withIncRecDepth do
   withTraceNodeBefore `Meta.isDefEq (fun _ => do
     -- unrestricted: trace collection only
     if trace.Meta.isDefEq.printTransparency.get (← getOptionsUnrestricted) then
@@ -2564,6 +2587,7 @@ partial def isExprDefEqAuxImpl (t : Expr) (s : Expr) : MetaM Bool := withIncRecD
         trace[Meta.isDefEq.cache] "cache {result} for {t} =?= {s}"
         cacheResult k result
       return result
+end
 
 builtin_initialize
   registerTraceClass `Meta.isDefEq

@@ -784,10 +784,21 @@ optional<constant_info> type_checker::is_delta(expr const & e) const {
     expr const & f = get_app_fn(e);
     if (is_constant(f)) {
         if (optional<constant_info> info = env().find(const_name(f)))
-            if (info->has_value() && length(const_levels(f)) == info->get_num_lparams())
+            if (info->has_value() && length(const_levels(f)) == info->get_num_lparams() &&
+                !is_abstract_blocked(info->get_name()))
                 return info;
     }
     return none_constant_info();
+}
+
+bool type_checker::is_abstract_blocked(name const & n) const {
+    if (!m_abstract_blocked) {
+        name_set blocked;
+        for (name const & c : env().get_blocked_abstracts(current_declaration_name()))
+            blocked.insert(c);
+        m_abstract_blocked = blocked;
+    }
+    return !m_abstract_blocked->empty() && m_abstract_blocked->contains(n);
 }
 
 optional<expr> type_checker::unfold_definition_core(expr const & e) {

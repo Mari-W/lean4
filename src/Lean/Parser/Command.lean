@@ -921,6 +921,15 @@ they use were checked under. `rewrite_rules h₁ … hₙ in <command>` does so 
 @[builtin_command_parser] def rewriteRules := leading_parser
   "rewrite_rules" >> many1 (ppSpace >> checkColGt >> ident)
 
+/--
+`abstract_block … end` makes the definitions of the block abstract when the block ends. Inside the
+block they unfold as usual, so equations about them can be proved there. Everywhere else they are
+stuck, and only their rewrite rules compute with them.
+-/
+@[builtin_command_parser] def abstractBlock := leading_parser
+  "abstract_block" >> many1 (ppLine >> notSymbol "end" >> commandParser) >>
+  ppDedent (ppLine >> "end")
+
 @[builtin_command_parser] def «in»  := trailing_parser
   withOpen (withSetOption (ppDedent (" in" >> ppLine >> commandParser)))
 

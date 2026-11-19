@@ -109,6 +109,8 @@ public:
     nat get_rewrite_prio(name const & thm) const;
     /** \brief The stored rule set `R(n)`, empty if none is stored. */
     array_ref<name> get_rewrite_set(name const & n) const;
+    /* The abstract definitions the declaration `decl` may not unfold. */
+    array_ref<name> get_blocked_abstracts(name const & decl) const;
     /** \brief `canon(E ∪ ⋃_{h ∈ E} R(h) ∪ ⋃_{c ∈ consts} R(c))`. */
     array_ref<name> close_rewrite_set(array_ref<name> const & explicit_rules, array_ref<name> const & consts) const;
     /** \brief Checks that the stored theorem `thm` is a rewrite rule and registers it. */
@@ -124,4 +126,6 @@ void check_no_metavar_no_fvar(environment const & env, name const & n, expr cons
 
 void initialize_environment();
 void finalize_environment();
+/* The declaration the kernel is checking on this thread, anonymous outside `environment::add`. */
+name const & current_declaration_name();
 }

@@ -124,6 +124,8 @@ structure ModuleRewrite where
   declIdx : Array Nat := #[]
   /-- For each entry of `declIdx`, the index of its rule set in `sets`. -/
   declSet : Array Nat := #[]
+  /-- Abstract definitions registered in this module, each with the declarations that may unfold it. -/
+  abstracts : Array (Name × Array Name) := #[]
   deriving Inhabited
 
 /-- Content of a .olean file.
@@ -229,6 +231,13 @@ structure Rewrites where
   sets     : SMap Name (Array Name) := SMap.empty.switch
   /-- Rules registered since the import, in registration order. -/
   newRules : Array RewriteRule := #[]
+  /--
+  The abstract definitions, each with the declarations that may unfold it, the members of its
+  `abstract` block. Every other declaration sees the definition as stuck.
+  -/
+  abstracts : SMap Name (Array Name) := SMap.empty.switch
+  /-- Abstract definitions registered since the import, in registration order. -/
+  newAbstracts : Array (Name × Array Name) := #[]
   deriving Inhabited
 
 /-- Sorts a rule set by `Name.quickCmp` and removes duplicates. The order carries no meaning: each
@@ -454,6 +463,39 @@ private def registerRewrite (env : Environment) (thm head : Name) (prio : Nat) :
       rules    := env.rewrites.rules.insert thm rule
       byHead   := env.rewrites.byHead.insert head (env.rewriteRulesFor head |>.push thm)
       newRules := env.rewrites.newRules.push rule } }
+
+/-- The declarations that may unfold the abstract definition `c`, if `c` is abstract. -/
+def abstractMembers? (env : Environment) (c : Name) : Option (Array Name) :=
+  env.rewrites.abstracts.find? c
+
+/-- Whether `c` is an abstract definition. -/
+def isAbstract (env : Environment) (c : Name) : Bool :=
+  (env.abstractMembers? c).isSome
+
+/-- The abstract definitions that the declaration `decl` may not unfold, for the kernel. -/
+@[export lean_kernel_blocked_abstracts]
+def blockedAbstracts (env : Environment) (decl : Name) : Array Name :=
+  let a := env.rewrites.abstracts
+  if a.map₁.isEmpty && a.map₂.isEmpty then #[] else
+    a.fold (init := #[]) fun acc c members => if members.contains decl then acc else acc.push c
+
+/-- Records `c` as abstract with the given members, without checks. -/
+def recordAbstract (env : Environment) (c : Name) (members : Array Name) : Environment :=
+  { env with rewrites := { env.rewrites with
+    abstracts    := env.rewrites.abstracts.insert c members
+    newAbstracts := env.rewrites.newAbstracts.push (c, members) } }
+
+/--
+Makes the definition `c` abstract: from now on only the declarations in `members` may unfold it.
+The members of an `abstract` block are checked before the block ends, so they keep unfolding it.
+-/
+def addAbstract (env : Environment) (c : Name) (members : Array Name) : Except Exception Environment := do
+  let some (.defnInfo _) := env.find? c
+    | throw <| .other s!"invalid abstract definition '{c}', it is not a definition"
+  if env.isAbstract c then
+    throw <| .other s!"'{c}' is already abstract"
+  return env.recordAbstract c members
+
 
 @[export lean_environment_add]
 private def add (env : Environment) (cinfo : ConstantInfo) : Environment :=
@@ -1047,6 +1089,25 @@ def recordRewriteSet (env : Environment) (n : Name) (set : Array Name) : Environ
   if set.isEmpty then env else
     { env with base.private := { env.base.private with
         rewrites.sets := env.base.private.rewrites.sets.insert n set } }
+
+@[inherit_doc Kernel.Environment.isAbstract]
+def isAbstract (env : Environment) (c : Name) : Bool :=
+  env.base.private.isAbstract c
+
+@[inherit_doc Kernel.Environment.abstractMembers?]
+def abstractMembers? (env : Environment) (c : Name) : Option (Array Name) :=
+  env.base.private.abstractMembers? c
+
+/--
+Makes the definition `c` abstract, see `Kernel.Environment.addAbstract`. The kernel and the
+elaborator both record it.
+-/
+def addAbstract (env : Environment) (c : Name) (members : Array Name) :
+    Except Kernel.Exception Environment := do
+  if env.isAbstract c then
+    throw <| .other s!"'{c}' is already abstract"
+  let env := env.modifyCheckedAsync (·.recordAbstract c members)
+  return { env with base.private := env.base.private.recordAbstract c members }
 
 /-- The kernel's rule set `R(n)`, waiting for all prior declarations to be checked. -/
 def kernelRewriteSet (env : Environment) (n : Name) : Array Name :=
@@ -2398,7 +2459,7 @@ private def computeExtEntries (env : Environment) :
 
 /-- The rules registered in this module and the interned rule sets of `constNames`. -/
 private def mkModuleRewrite (kenv : Kernel.Environment) (constNames : Array Name) : ModuleRewrite := Id.run do
-  let mut out : ModuleRewrite := { rules := kenv.rewrites.newRules }
+  let mut out : ModuleRewrite := { rules := kenv.rewrites.newRules, abstracts := kenv.rewrites.newAbstracts }
   let mut ids : Std.HashMap (Array Name) Nat := {}
   for h : i in [0:constNames.size] do
     let set := kenv.rewriteSet constNames[i]
@@ -2883,7 +2944,10 @@ def Kernel.Rewrites.ofModuleData (mods : Array ModuleData) : Kernel.Rewrites := 
   let mut byHead : Std.HashMap Name (Array Name) := {}
   let mut sets : Std.HashMap Name (Array Name) := {}
   let mut interned : Std.HashMap (Array Name) (Array Name) := {}
+  let mut abstracts : Std.HashMap Name (Array Name) := {}
   for data in mods do
+    for (c, members) in data.rewrites.abstracts do
+      abstracts := abstracts.insert c members
     for r in data.rewrites.rules do
       unless rules.contains r.thm do
         rules := rules.insert r.thm r
@@ -2898,6 +2962,7 @@ def Kernel.Rewrites.ofModuleData (mods : Array ModuleData) : Kernel.Rewrites := 
     rules  := SMap.fromHashMap rules false
     byHead := SMap.fromHashMap byHead false
     sets   := SMap.fromHashMap sets false
+    abstracts := SMap.fromHashMap abstracts false
   }
 
 /--
