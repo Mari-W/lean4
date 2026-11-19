@@ -576,6 +576,7 @@ def mkSimpEntryOfDeclToUnfold (declName : Name) : MetaM (Array SimpEntry) := do
   -- that neither theorems nor unfoldable. This should likely be tightened up in the future.
   if !(← getConstInfo declName).isDefinition && getOriginalConstKind? (← getEnv) declName == some .defn then
     throwError "Invalid simp theorem `{.ofConstName declName}`: Expected a definition with an exposed body"
+  throwIfAbstract declName
   if (← Simp.ignoreEquations declName) then
     entries := entries.push (.toUnfold declName)
   else if let some eqns ← getEqnsFor? declName then

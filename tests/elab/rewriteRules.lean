@@ -290,6 +290,86 @@ run_cmd addRflDecl `RewriteRulesTest.Stuck.withRule zeroAddTy zeroAddVal
 
 end RewriteRulesTest.Stuck
 
+/-! ## Level parameters match up to level equivalence
+
+A level parameter that occurs twice in a left-hand side matches levels that are equal up to level
+equivalence, so `max u v` matches `max v u`, in the elaborator and in the kernel. -/
+
+namespace RewriteRulesTest.Levels
+
+universe u v
+
+abstract_block
+def lift.{a, b} (n : Nat) (_ : PUnit.{a}) (_ : PUnit.{b}) : Nat := n
+@[rewrite] theorem lift_id.{a} (n : Nat) (x y : PUnit.{a}) : lift.{a, a} n x y = n := rfl
+end
+
+rewrite_rules lift_id in
+theorem lift_swap (n : Nat) (x : PUnit.{max u v}) (y : PUnit.{max v u}) :
+    lift.{max u v, max v u} n x y = n := rfl
+
+rewrite_rules lift_id in
+theorem lift_succ (n : Nat) (x : PUnit.{max u v + 1}) (y : PUnit.{max (v + 1) (u + 1)}) :
+    lift.{max u v + 1, max (v + 1) (u + 1)} n x y = n := rfl
+
+-- levels that differ for some assignment do not match
+rewrite_rules lift_id in
+example (n : Nat) (x : PUnit.{u}) (y : PUnit.{v}) : True := by
+  fail_if_success have : lift.{u, v} n x y = n := rfl
+  trivial
+
+-- a quotient map whose head and argument carry the same universe written two ways
+abstract_block
+def qmap {α : Sort u} {β : Sort v} {r : α → α → Prop} {s : β → β → Prop} (f : α → β)
+    (h : ∀ a b, r a b → s (f a) (f b)) : Quot r → Quot s :=
+  Quot.lift (fun x => Quot.mk s (f x)) (fun a b hab => Quot.sound (h a b hab))
+@[rewrite] theorem qmap_mk {α : Sort u} {β : Sort v} {r : α → α → Prop} {s : β → β → Prop}
+    (f : α → β) (h : ∀ a b, r a b → s (f a) (f b)) (a : α) :
+    qmap f h (Quot.mk r a) = Quot.mk s (f a) := rfl
+end
+
+rewrite_rules qmap_mk in
+theorem qmap_levels {α : Type (max u v)} {r : α → α → Prop} (f : α → α) (h : ∀ a b, r a b → r (f a) (f b))
+    (a : α) : qmap.{max u v + 1, max u v + 1} f h (Quot.mk.{max (u + 1) (v + 1)} r a) = Quot.mk r (f a) :=
+  rfl
+
+end RewriteRulesTest.Levels
+
+/-! ## Arguments that reduce to the pattern
+
+The elaborator retries a failed argument on its weak head normal form, as the kernel does, so a
+rule on `Quot.mk` fires on a coercion or a function that unfolds to `Quot.mk`. -/
+
+namespace RewriteRulesTest.Coe
+
+universe u v w
+
+abstract_block
+def qmap₂ {α : Sort u} {β : Sort v} {γ : Sort w} {sa : Setoid α} {sb : Setoid β} {sc : Setoid γ}
+    (f : α → β → γ) (h : ∀ a₁ b₁, sa.r a₁ b₁ → ∀ a₂ b₂, sb.r a₂ b₂ → sc.r (f a₁ a₂) (f b₁ b₂)) :
+    Quotient sa → Quotient sb → Quotient sc :=
+  Quotient.lift₂ (fun x y => Quotient.mk _ (f x y)) fun _ _ _ _ h₁ h₂ => Quot.sound (h _ _ h₁ _ _ h₂)
+@[rewrite] theorem qmap₂_mk {α : Sort u} {β : Sort v} {γ : Sort w} {sa : Setoid α} {sb : Setoid β}
+    {sc : Setoid γ} (f : α → β → γ)
+    (h : ∀ a₁ b₁, sa.r a₁ b₁ → ∀ a₂ b₂, sb.r a₂ b₂ → sc.r (f a₁ a₂) (f b₁ b₂)) (a : α) (b : β) :
+    qmap₂ f h (Quot.mk sa.r a) (Quot.mk sb.r b) = Quot.mk sc.r (f a b) := rfl
+end
+
+def triv (α : Type u) : Setoid α := ⟨fun _ _ => True, ⟨fun _ => trivial, fun _ => trivial, fun _ _ => trivial⟩⟩
+def Q (α : Type u) := Quotient (triv α)
+def toQ {α : Type u} (a : α) : Q α := Quotient.mk _ a
+instance {α : Type u} : Coe α (Q α) := ⟨toQ⟩
+instance {α : Type u} [Mul α] : Mul (Q α) :=
+  ⟨qmap₂ (sa := triv α) (sb := triv α) (sc := triv α) (· * ·) fun _ _ _ _ _ _ => trivial⟩
+
+rewrite_rules qmap₂_mk in
+example (a b : Nat) : (toQ a * toQ b : Q Nat) = toQ (a * b) := rfl
+
+rewrite_rules qmap₂_mk in
+example (a b : Nat) : ((a : Q Nat) * (b : Q Nat)) = ((a * b : Nat) : Q Nat) := rfl
+
+end RewriteRulesTest.Coe
+
 /-! ## Global rules, last because they are in force for every later declaration -/
 
 namespace RewriteRulesTest.Global

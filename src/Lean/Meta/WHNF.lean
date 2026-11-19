@@ -83,12 +83,15 @@ def isAuxDef (constName : Name) : MetaM Bool := do
 
 /--
 Retrieves `ConstInfo` for `declName`.
-Remark: if `ignoreTransparency = false`, then `getUnfoldableConst?` is used.
+Remark: if `ignoreTransparency = false`, then `getUnfoldableConst?` is used. An abstract definition
+outside its block is never returned.
 For example, if `ignoreTransparency = false` and `transparencyMode = .reducible` and `declName` is not reducible,
 then the result is `none`.
 -/
 private def getConstInfo? (declName : Name) (ignoreTransparency : Bool) : MetaM (Option ConstantInfo) := do
   if ignoreTransparency then
+    -- an abstract definition never unfolds outside its block, whatever the transparency
+    if (← getEnv).isAbstract declName then return none
     return (← getEnv).find? declName
   else
     getUnfoldableConst? declName
@@ -98,6 +101,8 @@ Similar to `getConstInfo?` but using `getUnfoldableConstNoEx?`.
 -/
 private def getConstInfoNoEx? (declName : Name) (ignoreTransparency : Bool) : MetaM (Option ConstantInfo) := do
   if ignoreTransparency then
+    -- an abstract definition never unfolds outside its block, whatever the transparency
+    if (← getEnv).isAbstract declName then return none
     return (← getEnv).find? declName
   else
     getUnfoldableConstNoEx? declName
@@ -619,7 +624,7 @@ partial def consumeUnusedLet (e : Expr) (consumeNondep : Bool := false) : Expr :
 
 A first-order matcher mirroring the kernel's (`type_checker::reduce_rewrite`): a pattern variable
 takes the subterm it meets, a repeated one must meet a definitionally equal subterm, a constant
-application matches syntactically, and a failed match of a constant application is retried once on
+application matches syntactically with levels compared up to level equivalence, and a failed match of a constant application is retried once on
 the weak head normal form of the subterm. -/
 
 private structure RewriteMatch where
@@ -636,7 +641,7 @@ private def matchRewriteLevels (rule : RewriteRuleInfo) (ps ls : List Level) :
     | .param n =>
       let some i := rule.levelParams.idxOf? n | return false
       match (← get).lvls[i]? with
-      | some (some l') => if l' != l then return false
+      | some (some l') => if !l'.isEquiv l then return false
       | _ => modify fun s => { s with lvls := s.lvls.set! i (some l) }
     | _ => modify fun s => { s with checks := s.checks.push (p, l) }
   return true
@@ -721,7 +726,7 @@ def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
     let some substs := st.args.mapM id | continue
     let ls := st.lvls.toList.map (·.getD .zero)
     unless st.checks.all fun (p, l) =>
-        levelParamsBound rule st.lvls p && p.instantiateParams rule.levelParams ls == l do
+        levelParamsBound rule st.lvls p && (p.instantiateParams rule.levelParams ls).isEquiv l do
       continue
     modify fun s => { s with rewriteFires := s.rewriteFires + 1 }
     if (← get).rewriteFires > 65536 then
