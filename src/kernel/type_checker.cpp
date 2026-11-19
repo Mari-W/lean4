@@ -740,6 +740,15 @@ optional<expr> type_checker::reduce_rewrite_step(expr const & e, bool stuck) {
    per group. Such rules match syntactically, without reducing any argument, so the test never
    reduces what unfolding would not. The rules of a head that does not unfold fire in `whnf_core`
    already, all of them in priority order. */
+/* Counters of whnf and defeq work for the diagnostics (experiment), counted under `KREPLAY_DIAG`. */
+static name const & tc_diag_name(unsigned i) {
+    static name const * names = new name[6]{
+        name({"_tc", "whnf", "hit"}), name({"_tc", "whnf", "miss"}), name({"_tc", "defeq", "calls"}),
+        name({"_tc", "defeq", "lazy"}), name({"_tc", "defeq", "successhit"}), name({"_tc", "defeq", "failhit"})};
+    return names[i];
+}
+#define TC_DIAG(i) do { if (m_diag) m_diag->record_unfold(tc_diag_name(i)); } while (0)
+
 /* Diagnostics of the test before unfolding (experiment): `KREPLAY_DIAG` counts these names. */
 static name const & rbd_diag_name(unsigned site, unsigned what) {
     /* never freed: a destructor at exit would release Lean objects after the runtime has shut down */
@@ -1171,8 +1180,11 @@ expr type_checker::whnf(expr const & e) {
 
     // check cache
     auto it = m_st->m_whnf.find(e);
-    if (it != m_st->m_whnf.end())
+    if (it != m_st->m_whnf.end()) {
+        TC_DIAG(0);
         return it->second;
+    }
+    TC_DIAG(1);
     if (is_closed(e) && shared_cache_on())
         if (auto r = xdecl_find(&xdecl_cache::generation::m_whnf, e))
             return *r;
@@ -1372,6 +1384,13 @@ lbool type_checker::is_def_eq_proof_irrel(expr const & t, expr const & s) {
 }
 
 bool type_checker::failed_before(expr const & t, expr const & s) const {
+    bool r = failed_before_core(t, s);
+    if (r)
+        TC_DIAG(5);
+    return r;
+}
+
+bool type_checker::failed_before_core(expr const & t, expr const & s) const {
     if (hash(t) < hash(s)) {
         return m_st->m_failure.find(mk_pair(t, s)) != m_st->m_failure.end();
     } else if (hash(t) > hash(s)) {
@@ -1400,7 +1419,10 @@ bool type_checker::succeeded_before(expr const & t, expr const & s) const {
         r = m_st->m_success.find(mk_pair(t, s)) != m_st->m_success.end() ||
             m_st->m_success.find(mk_pair(s, t)) != m_st->m_success.end();
     }
-    return r || (is_closed(t) && is_closed(s) && shared_cache_on() && xdecl_success(t, s));
+    r = r || (is_closed(t) && is_closed(s) && shared_cache_on() && xdecl_success(t, s));
+    if (r)
+        TC_DIAG(4);
+    return r;
 }
 
 void type_checker::cache_success(expr const & t, expr const & s) {
@@ -1648,6 +1670,7 @@ bool type_checker::is_def_eq_unit_like(expr const & t, expr const & s) {
 
 bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
     scope_rec_depth guard;
+    TC_DIAG(2);
     check_system("is_definitionally_equal", /* do_check_interrupted */ true);
     lbool r = quick_is_def_eq(t, s);
     if (r != l_undef) return r == l_true;
@@ -1682,6 +1705,7 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
 
     /* NB: `lazy_delta_reduction` updates `t_n` and `s_n` even when returning `l_undef`. */
     optional<expr> t_origin, s_origin;
+    TC_DIAG(3);
     r = lazy_delta_reduction(t_n, s_n, t_origin, s_origin);
     if (r != l_undef) return r == l_true;
 

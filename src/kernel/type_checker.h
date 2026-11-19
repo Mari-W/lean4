@@ -134,6 +134,7 @@ private:
     lbool is_def_eq_proof_irrel(expr const & t, expr const & s);
     bool is_def_eq_unit_like(expr const & t, expr const & s);
     bool failed_before(expr const & t, expr const & s) const;
+    bool failed_before_core(expr const & t, expr const & s) const;
     void cache_failure(expr const & t, expr const & s);
     bool succeeded_before(expr const & t, expr const & s) const;
     void cache_success(expr const & t, expr const & s);
