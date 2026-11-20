@@ -880,11 +880,13 @@ def resetCache : MetaM Unit :=
 @[inline] def modifyDefEqPermCache (f : DefEqCache → DefEqCache) : MetaM Unit :=
   modifyCache fun ⟨c1, c2, c3, c4, c5, defeqPerm⟩ => ⟨c1, c2, c3, c4, c5, f defeqPerm⟩
 
-def mkExprConfigCacheKey (expr : Expr) : MetaM ExprConfigCacheKey :=
-  return { expr, configKey := (← read).configKey }
+/-- `ruleBits` identifies the rule set the cached result depends on (`rewriteSetKeyBits`), 0 for none. -/
+def mkExprConfigCacheKey (expr : Expr) (ruleBits : UInt64 := 0) : MetaM ExprConfigCacheKey :=
+  return { expr, configKey := (← read).configKey ||| ruleBits }
 
-def mkDefEqCacheKey (lhs rhs : Expr) : MetaM DefEqCacheKey := do
-  let configKey := (← read).configKey
+/-- `ruleBits` identifies the rule set the cached result depends on (`rewriteSetKeyBits`), 0 for none. -/
+def mkDefEqCacheKey (lhs rhs : Expr) (ruleBits : UInt64 := 0) : MetaM DefEqCacheKey := do
+  let configKey := (← read).configKey ||| ruleBits
   if Expr.quickLt lhs rhs then
     return { lhs, rhs, configKey }
   else
@@ -2708,6 +2710,22 @@ def getActiveRewriteRules : MetaM (Array Name) := do
   if let some s := (← read).rewriteSet? then
     return s
   return env.closeRewriteSet (getExplicitRewriteRules env) #[]
+
+/--
+The bits that the whnf and defeq caches add to a key's `configKey` for the rule set `s`: a 40-bit
+hash of `s` in bits 24 to 63, above the bits of `Config.toKey`, and 0 for the empty set, so that
+without rules the keys are those of stock Lean. Results computed under different rule sets get
+different keys unless two sets collide in 40 bits. The key keeps the layout of
+`ExprConfigCacheKey` and `DefEqCacheKey`, which stage0's native code shares with the interpreter.
+-/
+def rewriteSetKeyBits (s : Array Name) : UInt64 :=
+  if s.isEmpty then 0 else
+    let k := (s.foldl (fun h n => mixHash h (hash n)) (hash s.size)) <<< 24
+    if k == 0 then (1 : UInt64) <<< 24 else k
+
+/-- `rewriteSetKeyBits` of the active rule set (`getActiveRewriteRules`). -/
+def getRewriteCacheBits : MetaM UInt64 :=
+  return rewriteSetKeyBits (← getActiveRewriteRules)
 
 /--
 The rule set the kernel would use for a declaration containing `t` and `s`: the explicit rules of

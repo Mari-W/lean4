@@ -124,6 +124,20 @@ example (l : List Nat) : r l = l := by
   fail_if_success exact rfl
   exact r_id l
 
+/-! ## The whnf cache holds the active rule set, also for a marked rule -/
+
+def withRules (rules : Array Name) (x : MetaM α) : MetaM α :=
+  withReader (fun ctx => { ctx with rewriteSet? := some rules }) x
+
+/-- info: [([1] ++ [], 0), ([1], 0), ([1] ++ [], 0)] -/
+#guard_msgs in
+run_meta do
+  let e := mkApp (mkConst ``f) (toExpr [(1 : Nat)])
+  let r1 ← withRules #[] (whnf e)
+  let r2 ← withRules #[``f_eq] (whnf e)
+  let r3 ← withRules #[] (whnf e)
+  logInfo m!"{[r1, r2, r3]}"
+
 /-! ## Attribute arguments -/
 
 /-- error: `f'_eq` is already a rewrite rule that fires only when unfolding its head gets stuck -/

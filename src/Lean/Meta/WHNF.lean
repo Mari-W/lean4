@@ -1222,24 +1222,26 @@ def reduceNat? (e : Expr) : MetaM (Option Expr) :=
     return none
 
 
-@[inline] private def useWHNFCache (e : Expr) : MetaM Bool := do
+/--
+The key of `e` in the whnf cache, if `e` may be cached. The key holds the active rule set
+(`getRewriteCacheBits`), because the result depends on it.
+-/
+@[inline] private def whnfCacheKey? (e : Expr) : MetaM (Option ExprConfigCacheKey) := do
   -- We cache only closed terms without expr metavars.
   -- Potential refinement: cache if `e` is not stuck at a metavariable
   if e.hasFVar || e.hasExprMVar || (← read).customCanUnfoldPredicate?.isSome then
-    return false
+    return none
   else
-    -- The cache does not record the rule set a result was computed under.
-    return (← getActiveRewriteRules).isEmpty
+    return some (← mkExprConfigCacheKey e (← getRewriteCacheBits))
 
-@[inline] private def cached? (useCache : Bool) (e : Expr) : MetaM (Option Expr) := do
-  if useCache then
-    return (← get).cache.whnf.find? (← mkExprConfigCacheKey e)
+@[inline] private def cached? (key? : Option ExprConfigCacheKey) : MetaM (Option Expr) := do
+  if let some key := key? then
+    return (← get).cache.whnf.find? key
   else
     return none
 
-private def cache (useCache : Bool) (e r : Expr) : MetaM Expr := do
-  if useCache then
-    let key ← mkExprConfigCacheKey e
+private def cache (key? : Option ExprConfigCacheKey) (r : Expr) : MetaM Expr := do
+  if let some key := key? then
     modify fun s => { s with cache.whnf := s.cache.whnf.insert key r }
   return r
 
@@ -1257,33 +1259,33 @@ set_option compiler.ignoreBorrowAnnotation true in
 @[export lean_whnf]
 partial def whnfImp (e : Expr) : MetaM Expr :=
   withIncRecDepth <| whnfEasyCases e fun e => withRewriteFuel do
-    let useCache ← useWHNFCache e
-    match (← cached? useCache e) with
+    let key? ← whnfCacheKey? e
+    match (← cached? key?) with
     | some e' => pure e'
     | none    =>
       withTraceNode `Meta.whnf (fun _ => return m!"Non-easy whnf: {e}") do
         checkSystem "whnf"
         let e' ← whnfCore e
         match (← reduceNat? e') with
-        | some v => cache useCache e v
+        | some v => cache key? v
         | none   =>
           match (← unfoldDefinition? e') with
           | some e'' =>
             -- a rule marked `@[rewrite ↓]` fires instead of the unfolding
             if let some e''' ← withRewriteFuel (reduceRewriteBeforeDelta? e') then
-              return ← cache useCache e (← whnfImp e''')
+              return ← cache key? (← whnfImp e''')
             let r ← whnfImp e''
             -- the unfolding of a head with rules got stuck, so its rules get their turn
             if (← isStuckRewriteOrigin e' r) then
               if let some e''' ← reduceRewrite? e' (stuck := true) then
-                return ← cache useCache e (← whnfImp e''')
-            cache useCache e r
+                return ← cache key? (← whnfImp e''')
+            cache key? r
           | none =>
             -- smart unfolding refuses to unfold a definition whose match is stuck, which counts as stuck too
             if let some e''' ← reduceRewrite? e' (stuck := true) then
-              cache useCache e (← whnfImp e''')
+              cache key? (← whnfImp e''')
             else
-              cache useCache e e'
+              cache key? e'
 
 /-- If `e` is a projection function that satisfies `p`, then reduce it -/
 def reduceProjOf? (e : Expr) (p : Name → Bool) : MetaM (Option Expr) := do

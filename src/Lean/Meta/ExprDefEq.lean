@@ -2478,9 +2478,10 @@ structure DefEqCacheKeyInfo where
   kind : DefEqCacheKind
   key  : DefEqCacheKey
 
+/-- The key holds the active rule set (`getRewriteCacheBits`), because the result depends on it. -/
 private def mkCacheKey (t s : Expr) : MetaM DefEqCacheKeyInfo := do
   let kind ← getDefEqCacheKind t s
-  let key ← mkDefEqCacheKey t s
+  let key ← mkDefEqCacheKey t s (← getRewriteCacheBits)
   return { key, kind }
 
 private def getCachedResult (keyInfo : DefEqCacheKeyInfo) : MetaM LBool := do
@@ -2501,7 +2502,7 @@ private def cacheResult (keyInfo : DefEqCacheKeyInfo) (result : Bool) : MetaM Un
     Otherwise, the key is invalid after the assignment is "backtracked".
     See issue #1870 for an example.
     -/
-    let key ← mkDefEqCacheKey (← instantiateMVars key.lhs) (← instantiateMVars key.rhs)
+    let key ← mkDefEqCacheKey (← instantiateMVars key.lhs) (← instantiateMVars key.rhs) (← getRewriteCacheBits)
     modifyDefEqTransientCache fun c => c.insert key result
 
 private def whnfCoreAtDefEq (e : Expr) : MetaM Expr := do
@@ -2596,9 +2597,6 @@ private partial def isExprDefEqAuxCore (t : Expr) (s : Expr) : MetaM Bool := wit
     let t ← instantiateMVars t
     let s ← instantiateMVars s
     let numPostponed ← getNumPostponed
-    -- The caches do not record the rule set a result was computed under.
-    unless (← getActiveRewriteRules).isEmpty do
-      return ← isExprDefEqExpensive t s
     let k ← mkCacheKey t s
     match (← getCachedResult k) with
     | .true  =>

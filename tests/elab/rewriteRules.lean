@@ -370,6 +370,55 @@ example (a b : Nat) : ((a : Q Nat) * (b : Q Nat)) = ((a * b : Nat) : Q Nat) := r
 
 end RewriteRulesTest.Coe
 
+/-! ## The whnf and defeq caches hold the active rule set
+
+One `MetaM` run computes the same `whnf` and `isDefEq` under different rule sets. A result cached
+under one set must not be reused under another. -/
+
+namespace RewriteRulesTest.Cache
+open Lean Meta
+
+def one : Expr := mkApp (mkConst ``Nat.succ) (mkConst ``Nat.zero)
+def plusOneOne : Expr := mkApp2 (mkConst ``plus) one one
+def succPlus : Expr := mkApp (mkConst ``Nat.succ) (mkApp2 (mkConst ``plus) one (mkConst ``Nat.zero))
+
+def withRules (rules : Array Name) (x : MetaM α) : MetaM α :=
+  withReader (fun ctx => { ctx with rewriteSet? := some rules }) x
+
+/--
+info: [plus Nat.zero.succ Nat.zero.succ,
+ (plus Nat.zero.succ Nat.zero).succ,
+ plus Nat.zero.succ Nat.zero.succ,
+ (plus Nat.zero.succ Nat.zero).succ]
+-/
+#guard_msgs in
+run_meta do
+  let r1 ← withRules #[] (whnf plusOneOne)
+  let r2 ← withRules #[``plus_succ] (whnf plusOneOne)
+  let r3 ← withRules #[] (whnf plusOneOne)
+  let r4 ← withRules #[``plus_succ] (whnf plusOneOne)
+  logInfo m!"{[r1, r2, r3, r4]}"
+
+/-- info: [false, true, false, true] -/
+#guard_msgs in
+run_meta do
+  let r1 ← withRules #[] (isDefEq plusOneOne succPlus)
+  let r2 ← withRules #[``plus_succ] (isDefEq plusOneOne succPlus)
+  let r3 ← withRules #[] (isDefEq plusOneOne succPlus)
+  let r4 ← withRules #[``plus_succ] (isDefEq plusOneOne succPlus)
+  logInfo m!"{[r1, r2, r3, r4]}"
+
+-- The rules of the scope change within one run, as `local` and `scoped` attributes change them.
+/-- info: [false, true] -/
+#guard_msgs in
+run_meta do
+  let r1 ← isDefEq plusOneOne succPlus
+  modifyEnv (rewriteScopeExt.addLocalEntry · ``plus_succ)
+  let r2 ← isDefEq plusOneOne succPlus
+  logInfo m!"{[r1, r2]}"
+
+end RewriteRulesTest.Cache
+
 /-! ## Global rules, last because they are in force for every later declaration -/
 
 namespace RewriteRulesTest.Global
