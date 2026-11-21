@@ -241,7 +241,11 @@ rewrite_rule_table::rewrite_rule_table(environment const & env, array_ref<name> 
                 if (x.m_pos == r.m_key_pos && x.m_const == r.m_key_const)
                     grp = &x;
             if (!grp) {
-                ph.m_groups.push_back(rewrite_pre_group{r.m_key_pos, r.m_key_const, {}});
+                bool ctor = false;
+                if (r.m_key_pos != UINT_MAX)
+                    if (optional<constant_info> kc = env.find(r.m_key_const))
+                        ctor = kc->is_constructor();
+                ph.m_groups.push_back(rewrite_pre_group{r.m_key_pos, r.m_key_const, ctor, {}});
                 grp = &ph.m_groups.back();
             }
             grp->m_rules.push_back(r);

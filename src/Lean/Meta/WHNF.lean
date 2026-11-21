@@ -54,6 +54,11 @@ def smartUnfoldingSuffix := "_sunfold"
 def hasSmartUnfoldingDecl (env : Environment) (declName : Name) : Bool :=
   env.contains (mkSmartUnfoldingNameFor declName)
 
+register_builtin_option maxRewriteFirings : Nat := {
+  defValue := 16777216
+  descr := "maximum number of rewrite rule firings in one command, as the kernel allows in one declaration"
+}
+
 register_builtin_option smartUnfolding : Bool := {
   defValue := true
   descr := "when computing weak head normal form, use auxiliary definition created for functions defined by structural recursion"
@@ -690,11 +695,11 @@ private def levelParamsBound (rule : RewriteRuleInfo) (lvls : Array (Option Leve
   | .max a b | .imax a b => levelParamsBound rule lvls a && levelParamsBound rule lvls b
   | _ => true
 
-/-- Fires the first rule of `cands` whose left-hand side matches a prefix of the application `e`. -/
-private def fireFirstRewrite (e : Expr) (us : List Level) (cands : Array RewriteRule) (syntactic : Bool) :
+/-- Fires the first rule of `cands` whose left-hand side matches a prefix of the application of a head
+at levels `us` to `args`. -/
+private def fireFirstRewrite (args : Array Expr) (us : List Level) (cands : Array RewriteRule) (syntactic : Bool) :
     MetaM (Option Expr) := do
   let env ← getEnv
-  let args := e.getAppArgs
   for cand in cands do
     let some rule := getRewriteRuleInfo? env cand.thm | continue
     let .const _ ps := rule.lhs.getAppFn | continue
@@ -718,12 +723,10 @@ private def fireFirstRewrite (e : Expr) (us : List Level) (cands : Array Rewrite
     unless st.checks.all fun (p, l) =>
         levelParamsBound rule st.lvls p && (p.instantiateParams rule.levelParams ls).isEquiv l do
       continue
-    modify fun s => { s with rewriteFires := s.rewriteFires + 1 }
-    if (← get).rewriteFires > 65536 then
-      throwError "rewrite rule budget exhausted: `{.ofConstName cand.thm}` would fire past 65536 firings"
     modify fun s => { s with rewriteTotal := s.rewriteTotal + 1 }
-    if (← get).rewriteTotal > 4194304 then
-      throwError "rewrite rule budget exhausted: `{.ofConstName cand.thm}` would fire past 4194304 firings in this declaration"
+    let limit := maxRewriteFirings.get (← getOptions)
+    if (← get).rewriteTotal > limit then
+      throwError "rewrite rule budget exhausted: `{.ofConstName cand.thm}` would fire past {limit} firings in this declaration"
     let rhs := (rule.rhs.instantiateLevelParams rule.levelParams ls).instantiateRev substs
     return some (mkAppN rhs (args.extract pargs.size args.size))
   return none
@@ -749,24 +752,64 @@ def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
   -- as in the kernel, a rule on a head that unfolds fires only when its unfolding got stuck
   if !stuck && (env.find? f).any (·.hasValue) && !env.isAbstract f then
     return none
-  fireFirstRewrite e us (← activeRewriteRules (registered.filterMap env.rewriteRule?)) false
+  fireFirstRewrite e.getAppArgs us (← activeRewriteRules (registered.filterMap env.rewriteRule?)) false
+
+/-- Whether the head of `e` is a constructor or `e` is a literal. -/
+private def isConstructorForm (env : Environment) (e : Expr) : Bool :=
+  e.isLit || match e.getAppFn with
+    | .const c _ => env.find? c matches some (.ctorInfo _)
+    | _ => false
+
+/--
+The key test of a rule with key constant `c` on the argument `a` at its key position. A `Nat` literal
+meets the keys `Nat.zero` and `Nat.succ` in constructor form, which is returned with the verdict.
+-/
+private def rewriteKeyMatches (c : Name) (a : Expr) : Bool × Expr :=
+  let a := match a with
+    | .lit (.natVal v) =>
+      if c == ``Nat.zero || c == ``Nat.succ then
+        if v == 0 then mkConst ``Nat.zero else mkApp (mkConst ``Nat.succ) (mkRawNatLit (v - 1))
+      else a
+    | _ => a
+  (a.getAppFn.isConstOf c, a)
 
 /--
 Fires a rule marked `@[rewrite ↓]` on `e`, whose head the caller is about to unfold, as the kernel's
 `reduce_before_delta` does: one test without such rules, one lookup for a head without them, and a
 comparison of the argument at each rule's key position (`RewriteRule.keyArg`) before any matching.
-These rules match without reducing any argument.
+When the key is a constructor and the argument is not in constructor form yet, the argument is
+reduced to weak head normal form first and stays reduced for matching, which unfolding the head
+would do anyway. Otherwise these rules match without reducing any argument.
 -/
 def reduceRewriteBeforeDelta? (e : Expr) : MetaM (Option Expr) := do
   let env ← getEnv
   unless env.hasPreRewriteRules do return none
   let .const f us := e.getAppFn | return none
   let some rules := env.preRewriteRulesFor? f | return none
-  let args := e.getAppArgs
-  let hits := rules.filter fun r =>
-    r.keyArg == 0 || (args[r.keyArg - 1]?.any fun a => a.getAppFn.isConstOf r.keyConst)
+  -- only the rules in force, as in the kernel's table, so no argument is reduced for another rule
+  let rules ← activeRewriteRules rules
+  if rules.isEmpty then return none
+  let mut args := e.getAppArgs
+  let mut hits := #[]
+  for r in rules do
+    if r.keyArg == 0 then
+      hits := hits.push r
+      continue
+    let p := r.keyArg - 1
+    let some a := args[p]? | continue
+    let (ok, a) := rewriteKeyMatches r.keyConst a
+    args := args.set! p a
+    if ok then
+      hits := hits.push r
+      continue
+    unless env.find? r.keyConst matches some (.ctorInfo _) do continue
+    if isConstructorForm env a then continue
+    let (ok, a) := rewriteKeyMatches r.keyConst (← whnf a)
+    args := args.set! p a
+    if ok then
+      hits := hits.push r
   if hits.isEmpty then return none
-  fireFirstRewrite e us (← activeRewriteRules hits) true
+  fireFirstRewrite args us hits true
 
 /--
 Fires rewrite rules at the head of `e` as long as one matches (`reduceRewriteStep?`). Iterating
@@ -781,22 +824,12 @@ partial def reduceRewrite? (e : Expr) (stuck := false) : MetaM (Option Expr) := 
   return some (← loop e')
 
 /--
-Runs `x` counting rule firings from zero, unless an enclosing call already counts them.
--/
-@[inline] def withRewriteFuel (x : MetaM α) : MetaM α := do
-  if (← read).rewriteFuelScope || !(← getEnv).hasRewriteRules then
-    x
-  else
-    modify fun s => { s with rewriteFires := 0 }
-    withReader (fun ctx => { ctx with rewriteFuelScope := true }) x
-
-/--
 Apply beta-reduction, zeta-reduction (i.e., unfold let local-decls), iota-reduction,
 expand let-expressions, expand assigned meta-variables, unfold aux declarations,
 and fire the active user rewrite rules.
 -/
 partial def whnfCore (e : Expr) : MetaM Expr :=
-  withRewriteFuel (go e)
+  go e
 where
   go (e : Expr) : MetaM Expr := do
     whnfEasyCases e fun e => do
@@ -1258,7 +1291,7 @@ def isStuckRewriteOrigin (e r : Expr) : MetaM Bool := do
 set_option compiler.ignoreBorrowAnnotation true in
 @[export lean_whnf]
 partial def whnfImp (e : Expr) : MetaM Expr :=
-  withIncRecDepth <| whnfEasyCases e fun e => withRewriteFuel do
+  withIncRecDepth <| whnfEasyCases e fun e => do
     let key? ← whnfCacheKey? e
     match (← cached? key?) with
     | some e' => pure e'
@@ -1272,7 +1305,7 @@ partial def whnfImp (e : Expr) : MetaM Expr :=
           match (← unfoldDefinition? e') with
           | some e'' =>
             -- a rule marked `@[rewrite ↓]` fires instead of the unfolding
-            if let some e''' ← withRewriteFuel (reduceRewriteBeforeDelta? e') then
+            if let some e''' ← reduceRewriteBeforeDelta? e' then
               return ← cache key? (← whnfImp e''')
             let r ← whnfImp e''
             -- the unfolding of a head with rules got stuck, so its rules get their turn

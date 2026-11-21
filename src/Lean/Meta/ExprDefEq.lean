@@ -1701,7 +1701,7 @@ as the kernel does when only one side or two different heads unfold.
 private abbrev unfold (e : Expr) (failK : MetaM α) (successK : Expr → MetaM α) : MetaM α := do
   match (← unfoldDefinition? e) with
   | some e' =>
-    match (← withRewriteFuel (reduceRewriteBeforeDelta? e)) with
+    match (← reduceRewriteBeforeDelta? e) with
     | some r => successK r
     | none   => successK e'
   | none   => failK
@@ -1710,10 +1710,11 @@ private abbrev unfold (e : Expr) (failK : MetaM α) (successK : Expr → MetaM �
 Rules marked `@[rewrite ↓]` on the same head on both sides fire only if they fire on both sides, so
 that the two sides keep the same shape, as in the kernel.
 -/
-private def rewriteBothBeforeDelta? (t s : Expr) : MetaM (Option (Expr × Expr)) := withRewriteFuel do
+private def rewriteBothBeforeDelta? (t s : Expr) : MetaM (Option (Expr × Expr)) := do
+  unless (← getEnv).hasPreRewriteRules do return none
+  unless (← unfoldDefinition? t).isSome && (← unfoldDefinition? s).isSome do return none
   let some t' ← reduceRewriteBeforeDelta? t | return none
   let some s' ← reduceRewriteBeforeDelta? s | return none
-  unless (← unfoldDefinition? t).isSome && (← unfoldDefinition? s).isSome do return none
   return some (t', s')
 
 /-- Auxiliary method for isDefEqDelta -/

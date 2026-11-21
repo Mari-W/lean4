@@ -67,13 +67,14 @@ private:
     /* The abstract definitions this declaration may not unfold, computed on first use. */
     mutable optional<name_set> m_abstract_blocked;
     bool is_abstract_blocked(name const & n) const;
-    /* Rule firings since the outermost active `whnf`/`whnf_core` call, and the nesting depth of those calls. */
-    unsigned                  m_rewrite_fires = 0;
+    /* Rule firings in this checker's declaration, against `LEAN_REWRITE_DECL_BUDGET`. */
     unsigned                  m_rewrite_total = 0;
-    unsigned                  m_rewrite_depth = 0;
     /* Set while rules marked `@[rewrite ↓]` match: no argument is reduced. */
     bool                      m_rewrite_syntactic = false;
-    friend class rewrite_fuel_scope;
+    /* Right-hand sides with their universe levels instantiated, keyed by the rule theorem applied to
+       the levels. */
+    std::unordered_map<expr, expr, expr_hash> m_rewrite_rhs;
+    expr instantiate_rewrite_rhs(rewrite_rule const & rule, levels const & us, unsigned n, expr const * subst);
     /* Whether this checker reads and publishes the cache across declarations (`enable_shared_cache`). */
     bool                      m_shared = false;
 

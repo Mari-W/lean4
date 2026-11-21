@@ -618,9 +618,7 @@ structure State where
   /-- Array of postponed universe level constraints -/
   postponed        : PersistentArray PostponedEntry := {}
   diag             : Diagnostics := {}
-  /-- Rewrite rule firings since the outermost active `whnfCore` call. -/
-  rewriteFires     : Nat := 0
-  /-- Rewrite rule firings since this state was created; never reset by `withRewriteFuel`. -/
+  /-- Rewrite rule firings since this state was created, against `maxRewriteFirings`. -/
   rewriteTotal     : Nat := 0
   deriving Inhabited
 
@@ -707,8 +705,6 @@ structure Context where
   explicit rules alone is used. See `getActiveRewriteRules`.
   -/
   rewriteSet? : Option (Array Name) := none
-  /-- Whether a `whnfCore` call that counts rule firings is active. -/
-  rewriteFuelScope : Bool := false
 deriving Inhabited
 
 def Context.config (c : Context) : Config := c.keyedConfig.config
@@ -866,7 +862,7 @@ section Methods
 variable [MonadControlT MetaM n] [Monad n]
 
 @[inline] def modifyCache (f : Cache → Cache) : MetaM Unit :=
-  modify fun { mctx, cache, zetaDeltaFVarIds, postponed, diag, rewriteFires, rewriteTotal } => { mctx, cache := f cache, zetaDeltaFVarIds, postponed, diag, rewriteFires, rewriteTotal }
+  modify fun { mctx, cache, zetaDeltaFVarIds, postponed, diag, rewriteTotal } => { mctx, cache := f cache, zetaDeltaFVarIds, postponed, diag, rewriteTotal }
 
 def resetCache : MetaM Unit :=
   modifyCache fun _ => {}
@@ -905,7 +901,7 @@ def resetSynthInstanceCache : MetaM Unit := do
 
 @[inline] def modifyDiag (f : Diagnostics → Diagnostics) : MetaM Unit := do
   if (← isDiagnosticsEnabled) then
-    modify fun { mctx, cache, zetaDeltaFVarIds, postponed, diag, rewriteFires, rewriteTotal } => { mctx, cache, zetaDeltaFVarIds, postponed, diag := f diag, rewriteFires, rewriteTotal }
+    modify fun { mctx, cache, zetaDeltaFVarIds, postponed, diag, rewriteTotal } => { mctx, cache, zetaDeltaFVarIds, postponed, diag := f diag, rewriteTotal }
 
 /-- If diagnostics are enabled, record that `declName` has been unfolded. -/
 def recordUnfold (declName : Name) : MetaM Unit := do

@@ -6,6 +6,7 @@ by the kernel alone (`kernel_rfl`), and both agree.
 -/
 namespace RewriteRulesBeforeDeltaTest
 open Lean Elab Command Meta
+universe u v
 
 /-- `kernel_rfl n : ∀ xs, l = r` adds `n : ∀ xs, l = r := fun xs => rfl` straight to the kernel, bypassing the elaborator. -/
 elab "kernel_rfl " name:ident " : " t:term : command => do
@@ -77,23 +78,140 @@ example (l : List Nat) : p true l = p false l := rfl
 rewrite_rules p_true in
 kernel_rfl p_kernel : ∀ l, p true l = p false l
 
-/-! ## Marked rules match syntactically -/
+/-! ## A constructor key reduces its argument first, every other argument matches syntactically -/
 
--- `p (!false) l` reduces to `p true l`, but the rule does not reduce arguments, so it does not fire
+-- The key of `p_true` is the constructor `true` at the first argument. `!false` is not in
+-- constructor form, so it is reduced to `true` before the key test, and the rule fires.
 rewrite_rules p_true in
-example (l : List Nat) : p (!false) l = (l, 0) := by
-  fail_if_success exact rfl
-  exact p_true l
+example (l : List Nat) : p (!false) l = (l, 0) := rfl
 
-/--
-error: (kernel) declaration type mismatch, 'p_kernel'' has type
-  ∀ (l : List Nat), p (!false) l = p (!false) l
-but it is expected to have type
-  ∀ (l : List Nat), p (!false) l = (l, 0)
--/
-#guard_msgs in
 rewrite_rules p_true in
 kernel_rfl p_kernel' : ∀ l, p (!false) l = (l, 0)
+
+def p2 (_ _ : Bool) (l : List Nat) : List Nat × Nat := (l ++ [], 0)
+
+@[rewrite ↓] theorem p2_tt (l : List Nat) : p2 true true l = (l, 0) := by simp [p2]
+
+rewrite_rules p2_tt in
+example (l : List Nat) : p2 (!false) true l = (l, 0) := rfl
+
+-- the second argument is not the key, so `!false` there is not reduced and the rule does not fire
+rewrite_rules p2_tt in
+example (l : List Nat) : p2 true (!false) l = (l, 0) := by
+  fail_if_success exact rfl
+  exact p2_tt l
+
+/--
+error: (kernel) declaration type mismatch, 'p2_kernel' has type
+  ∀ (l : List Nat), p2 true (!false) l = p2 true (!false) l
+but it is expected to have type
+  ∀ (l : List Nat), p2 true (!false) l = (l, 0)
+-/
+#guard_msgs in
+rewrite_rules p2_tt in
+kernel_rfl p2_kernel : ∀ l, p2 true (!false) l = (l, 0)
+
+-- a key argument that reduces to another constructor, or to no constructor, fires nothing
+rewrite_rules p_true in
+example (l : List Nat) : p (!true) l = (l ++ [], 0) := rfl
+
+rewrite_rules p_true in
+example (b : Bool) (l : List Nat) : p (!b) l = (l ++ [], 0) := rfl
+
+/-! ## A `Nat` literal at a constructor key counts as `Nat.zero` or `Nat.succ` -/
+
+def z : Nat → List Nat → List Nat × Nat
+  | 0, l => (l ++ [], 0)
+  | _ + 1, _ => ([], 1)
+
+@[rewrite ↓] theorem z_zero (l : List Nat) : z .zero l = (l, 0) := by simp [z]
+
+rewrite_rules z_zero in
+example (l : List Nat) : z 0 l = (l, 0) := rfl
+
+rewrite_rules z_zero in
+example (l : List Nat) : z (id 0) l = (l, 0) := rfl
+
+rewrite_rules z_zero in
+example (l : List Nat) : z (id 3) l = ([], 1) := rfl
+
+rewrite_rules z_zero in
+kernel_rfl z_kernel : ∀ l, z 0 l = (l, 0)
+
+rewrite_rules z_zero in
+kernel_rfl z_kernel' : ∀ l, z (id 0) l = (l, 0)
+
+/-! ## A rule on `cond` fires on a key argument that computes -/
+
+def isTrue (_ : List Nat) : Bool := true
+def isFalse (_ : List Nat) : Bool := false
+
+@[rewrite ↓] theorem cond_tt {α : Type u} (a b : α) : cond true a b = a := rfl
+
+-- `isTrue l` is reduced to `true` before the key test, so `cond_tt` fires. With no firing left in
+-- the budget the elaborator reports it.
+/-- error: rewrite rule budget exhausted: `cond_tt` would fire past 0 firings in this declaration -/
+#guard_msgs in
+set_option maxRewriteFirings 0 in
+rewrite_rules cond_tt in
+example (l : List Nat) : cond (isTrue l) l [] = l := rfl
+
+-- `isFalse l` is reduced to `false`, which no rule has as its key, so `cond` unfolds
+set_option maxRewriteFirings 0 in
+rewrite_rules cond_tt in
+example (l : List Nat) : cond (isFalse l) [] l = l := rfl
+
+rewrite_rules cond_tt in
+example (l : List Nat) : cond (isTrue l) l [] = l := rfl
+
+rewrite_rules cond_tt in
+kernel_rfl cond_kernel : ∀ l, cond (isTrue l) l [] = l
+
+/-! ## A list fold -/
+
+def two (n : Nat) : List Nat := [n, n]
+
+@[rewrite ↓] theorem foldr_nil' {α : Type u} {β : Type v} (f : α → β → β) (i : β) :
+    List.foldr f i [] = i := rfl
+@[rewrite ↓] theorem foldr_cons' {α : Type u} {β : Type v} (f : α → β → β) (i : β) (a : α)
+    (l : List α) : List.foldr f i (a :: l) = f a (List.foldr f i l) := rfl
+
+-- `two n` is reduced to `n :: [n]` before the key test, and every step of the fold is a firing
+rewrite_rules foldr_nil' foldr_cons' in
+example (f : Nat → Nat → Nat) (n : Nat) : List.foldr f 0 (two n) = f n (f n 0) := rfl
+
+rewrite_rules foldr_nil' foldr_cons' in
+kernel_rfl foldr_kernel : ∀ (f : Nat → Nat → Nat) n, List.foldr f 0 (two n) = f n (f n 0)
+
+rewrite_rules foldr_nil' foldr_cons' in
+kernel_rfl foldr_kernel' : List.foldr (· + ·) 0 (List.map (· * 2) [1, 2, 3]) = 12
+
+/-- error: rewrite rule budget exhausted: `foldr_cons'` would fire past 0 firings in this declaration -/
+#guard_msgs in
+set_option maxRewriteFirings 0 in
+rewrite_rules foldr_nil' foldr_cons' in
+example (f : Nat → Nat → Nat) (n : Nat) : List.foldr f 0 (two n) = f n (f n 0) := rfl
+
+/-! ## The firing budget counts per declaration and stops a looping set of marked rules -/
+
+def loopA (n : Nat) : Nat := n
+def loopB (n : Nat) : Nat := n
+
+@[rewrite ↓] theorem loopA_B (n : Nat) : loopA n = loopB n := rfl
+@[rewrite ↓] theorem loopB_A (n : Nat) : loopB n = loopA n := rfl
+
+/-- error: rewrite rule budget exhausted: `loopA_B` would fire past 1000 firings in this declaration -/
+#guard_msgs in
+set_option maxRewriteFirings 1000 in
+rewrite_rules loopA_B loopB_A in
+example : loopA 0 = 0 := rfl
+
+/--
+error: (kernel) rewrite rule budget exhausted: 'RewriteRulesBeforeDeltaTest.loopA_B' would fire past 16777216 firings in this declaration
+-/
+#guard_msgs in
+rewrite_rules loopA_B loopB_A in
+kernel_rfl loop_kernel : loopA 0 = 0
 
 /-! ## Priority across both placements -/
 
@@ -137,6 +255,18 @@ run_meta do
   let r2 ← withRules #[``f_eq] (whnf e)
   let r3 ← withRules #[] (whnf e)
   logInfo m!"{[r1, r2, r3]}"
+
+-- the same with a key argument that is reduced before the key test
+/-- info: [([1] ++ [], 0), ([1], 0), ([1] ++ [], 0), ([1], 0)] -/
+#guard_msgs in
+run_meta do
+  let l := toExpr [(1 : Nat)]
+  let e := mkApp2 (mkConst ``p) (mkApp (mkConst ``isTrue) l) l
+  let r1 ← withRules #[] (whnf e)
+  let r2 ← withRules #[``p_true] (whnf e)
+  let r3 ← withRules #[] (whnf e)
+  let r4 ← withRules #[``p_true] (whnf e)
+  logInfo m!"{[r1, r2, r3, r4]}"
 
 /-! ## Attribute arguments -/
 

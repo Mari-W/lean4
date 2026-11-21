@@ -15,11 +15,10 @@ Author: Marius Weidner
 #include "kernel/environment.h"
 
 namespace lean {
-/* Firings allowed per outermost `whnf`/`whnf_core` call before the kernel gives up. */
-#define LEAN_REWRITE_FIRE_BUDGET 65536
-/* Firings allowed in one declaration's check. Lazy delta resets the budget above at every step, so
-   a rule whose right-hand side unfolds back to its left-hand side needs this one to stop. */
-#define LEAN_REWRITE_DECL_BUDGET 4194304
+/* Firings allowed in one declaration's check, counted over every rule and every site. One terminating
+   evaluation needs up to 1.2 M firings (ClusterAlgebras certificate checks), and a rule set that loops
+   stops at this limit. */
+#define LEAN_REWRITE_DECL_BUDGET 16777216
 
 /* A user rewrite rule `∀ xs, l = r` read off its theorem. `m_lhs` and `m_rhs` live under the
    `m_nvars` binders `xs`: the loose bound variable `i` names `xs[m_nvars - 1 - i]`. */
@@ -59,12 +58,15 @@ struct rewrite_head {
 struct rewrite_pre_group {
     unsigned                  m_pos;
     name                      m_const;
+    /* `m_const` is a constructor: an argument at `m_pos` that is not in constructor form is reduced
+       to whnf before the key test. */
+    bool                      m_ctor;
     std::vector<rewrite_rule> m_rules;
 };
 
 /* The rules of one head that fire before unfolding, grouped by key. A term is a candidate for a
-   group if its argument at `m_pos` has the head constant `m_const`; a group with `m_pos ==
-   UINT_MAX` takes every term. */
+   group if its argument at `m_pos` has the head constant `m_const`, after reduction to whnf when
+   `m_const` is a constructor; a group with `m_pos == UINT_MAX` takes every term. */
 struct rewrite_pre_head {
     optional<constant_info>        m_info;
     std::vector<rewrite_pre_group> m_groups;

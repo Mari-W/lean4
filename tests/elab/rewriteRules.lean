@@ -185,13 +185,17 @@ def pingEq : Expr :=
 
 def rflZero : Expr := mkApp2 (mkConst ``Eq.refl [1]) (mkConst ``Nat) (mkNatLit 0)
 
--- The elaborator stops the loop with the same budget.
-/-- error: rewrite rule budget exhausted: `ping_pong` would fire past 65536 firings -/
+-- The elaborator stops the loop with the same budget per declaration, `maxRewriteFirings`, which
+-- this test lowers to keep it short.
+/-- error: rewrite rule budget exhausted: `ping_pong` would fire past 1000 firings in this declaration -/
 #guard_msgs in
+set_option maxRewriteFirings 1000 in
 rewrite_rules ping_pong pong_ping in
 example : ping 0 = 0 := rfl
 
-/-- error: (kernel) rewrite rule budget exhausted: 'RewriteRulesTest.ping_pong' would fire past 65536 firings -/
+/--
+error: (kernel) rewrite rule budget exhausted: 'RewriteRulesTest.ping_pong' would fire past 16777216 firings in this declaration
+-/
 #guard_msgs in
 rewrite_rules ping_pong pong_ping in
 run_cmd addRflDecl `RewriteRulesTest.pingLoop pingEq rflZero

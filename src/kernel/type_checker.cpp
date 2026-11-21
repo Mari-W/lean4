@@ -498,16 +498,40 @@ bool type_checker::is_prop(expr const & e) {
     return normalizes_to_zero(sort_level(s));
 }
 
-/* Resets the rule firing counter at the outermost `whnf`/`whnf_core` call. */
-class rewrite_fuel_scope {
-    type_checker & m_tc;
-public:
-    rewrite_fuel_scope(type_checker & tc):m_tc(tc) {
-        if (m_tc.m_rewrite_depth++ == 0)
-            m_tc.m_rewrite_fires = 0;
+/* The right-hand side of `rule` at levels `us` with its variables replaced by `subst`, as
+   `instantiate_rev(instantiate_lparams(rhs, lparams, us), n, subst)`. The level instantiation is
+   cached per rule and levels, and the substitution runs without the cache of `replace`, because right
+   sides are small and rarely share subterms. */
+expr type_checker::instantiate_rewrite_rhs(rewrite_rule const & rule, levels const & us, unsigned n, expr const * subst) {
+    expr rhs = rule.m_rhs;
+    if (!is_nil(us) && has_param_univ(rhs)) {
+        expr key = mk_constant(rule.m_thm, us);
+        auto it = m_rewrite_rhs.find(key);
+        if (it != m_rewrite_rhs.end()) {
+            rhs = it->second;
+        } else {
+            rhs = instantiate_lparams(rhs, rule.m_lparams, us);
+            m_rewrite_rhs.insert(mk_pair(key, rhs));
+        }
     }
-    ~rewrite_fuel_scope() { m_tc.m_rewrite_depth--; }
-};
+    if (n == 0 || !has_loose_bvars(rhs))
+        return rhs;
+    return replace(rhs, [=](expr const & m, unsigned offset) -> optional<expr> {
+            if (offset >= get_loose_bvar_range(m))
+                return some_expr(m);
+            if (is_bvar(m)) {
+                nat const & vidx = bvar_idx(m);
+                if (vidx >= offset) {
+                    size_t h = offset + n;
+                    if (h < offset || (vidx.is_small() && vidx.get_small_value() < h))
+                        return some_expr(lift_loose_bvars(subst[n - (vidx.get_small_value() - offset) - 1], offset));
+                    else
+                        return some_expr(mk_bvar(vidx - nat(n)));
+                }
+            }
+            return none_expr();
+        }, false);
+}
 
 bool type_checker::match_rewrite_levels(rewrite_rule const & rule, levels const & ps, levels const & ls,
                                         buffer<optional<level>> & lsubst, buffer<std::pair<level, level>> & lchecks) {
@@ -703,13 +727,10 @@ optional<expr> type_checker::fire_first_rule(std::vector<rewrite_rule> const & r
         /* The kernel never unfolds a theorem, so a rule theorem's count is its number of firings. */
         if (m_diag)
             m_diag->record_unfold(rule.m_thm);
-        if (++m_rewrite_fires > LEAN_REWRITE_FIRE_BUDGET)
-            throw kernel_exception(env(), sstream() << "rewrite rule budget exhausted: '" << rule.m_thm
-                                   << "' would fire past " << LEAN_REWRITE_FIRE_BUDGET << " firings");
         if (++m_rewrite_total > LEAN_REWRITE_DECL_BUDGET)
             throw kernel_exception(env(), sstream() << "rewrite rule budget exhausted: '" << rule.m_thm
                                    << "' would fire past " << LEAN_REWRITE_DECL_BUDGET << " firings in this declaration");
-        expr r = instantiate_rev(instantiate_lparams(rule.m_rhs, rule.m_lparams, us), subst.size(), subst.data());
+        expr r = instantiate_rewrite_rhs(rule, us, subst.size(), subst.data());
         return some_expr(mk_app(r, args.size() - rule.m_nargs, args.data() + rule.m_nargs));
     }
     return none_expr();
@@ -734,12 +755,6 @@ optional<expr> type_checker::reduce_rewrite_step(expr const & e, bool stuck) {
     return fire_first_rule(h->m_rules, f, args);
 }
 
-/* Fire a rule marked `@[rewrite ↓]` on `e`, whose head is about to be unfolded. A rule set without such
-   rules costs one test, and a head without them one hash lookup. A head with them groups its rules by
-   key, so a term whose argument at the key position has another head constant costs one comparison
-   per group. Such rules match syntactically, without reducing any argument, so the test never
-   reduces what unfolding would not. The rules of a head that does not unfold fire in `whnf_core`
-   already, all of them in priority order. */
 /* Counters of whnf and defeq work for the diagnostics (experiment), counted under `KREPLAY_DIAG`. */
 static name const & tc_diag_name(unsigned i) {
     static name const * names = new name[6]{
@@ -759,15 +774,36 @@ static name const & rbd_diag_name(unsigned site, unsigned what) {
     return names[site * 3 + what];
 }
 
-/* LEAN_REWRITE_BD_RETRY=1 lets marked rules reduce non-matching arguments, as ordinary rules do (experiment). */
-static bool before_delta_retry() {
-    static bool const on = [] {
-        char const * s = getenv("LEAN_REWRITE_BD_RETRY");
-        return s != nullptr && s[0] == '1';
-    }();
-    return on;
+/* Whether the head of `e` is a constructor or `e` is a literal. */
+static bool is_constructor_form(environment const & env, expr const & e) {
+    if (is_lit(e))
+        return true;
+    expr const & f = get_app_fn(e);
+    if (!is_constant(f))
+        return false;
+    optional<constant_info> ci = env.find(const_name(f));
+    return ci && ci->is_constructor();
 }
 
+/* The key test of group `g` on the argument `a` at its key position. A `Nat` literal meets the keys
+   `Nat.zero` and `Nat.succ` in constructor form. */
+static bool key_matches(rewrite_pre_group const & g, expr & a) {
+    /* never freed: a destructor at exit would release Lean objects after the runtime has shut down */
+    static name const * nat_zero = new name{"Nat", "zero"};
+    static name const * nat_succ = new name{"Nat", "succ"};
+    if (is_nat_lit(a) && (g.m_const == *nat_zero || g.m_const == *nat_succ))
+        a = nat_lit_to_constructor(a);
+    expr const & h = get_app_fn(a);
+    return is_constant(h) && const_name(h) == g.m_const;
+}
+
+/* Fire a rule marked `@[rewrite ↓]` on `e`, whose head is about to be unfolded. A rule set without such
+   rules costs one test, and a head without them one hash lookup. A head with them groups its rules by
+   key, so a term whose argument at the key position has another head constant costs one comparison
+   per group. When the key is a constructor and the argument is not in constructor form yet, the
+   argument is reduced to whnf first and stays reduced for matching, which unfolding the head would
+   do anyway. Otherwise these rules match syntactically. The rules of a head that does not unfold
+   fire in `whnf_core` already, all of them in priority order. */
 optional<expr> type_checker::reduce_before_delta(expr const & e, unsigned site) {
     if (!m_rules.has_before_delta())
         return none_expr();
@@ -775,7 +811,7 @@ optional<expr> type_checker::reduce_before_delta(expr const & e, unsigned site) 
     if (!is_constant(f))
         return none_expr();
     rewrite_pre_head const * h = m_rules.find_before_delta(const_name(f));
-    if (!h)
+    if (!h || !rule_head_unfolds(h->m_info, f))
         return none_expr();
     buffer<expr> args;
     get_app_args(e, args);
@@ -785,31 +821,34 @@ optional<expr> type_checker::reduce_before_delta(expr const & e, unsigned site) 
         if (g.m_pos != UINT_MAX) {
             if (g.m_pos >= args.size())
                 continue;
-            expr const & a = get_app_fn(args[g.m_pos]);
-            if (!is_constant(a) || const_name(a) != g.m_const)
-                continue;
+            if (!key_matches(g, args[g.m_pos])) {
+                if (!g.m_ctor || is_constructor_form(env(), args[g.m_pos]))
+                    continue;
+                args[g.m_pos] = whnf(args[g.m_pos]);
+                if (!key_matches(g, args[g.m_pos]))
+                    continue;
+            }
         }
         several = several || hit;
         hit = &g;
     }
-    if (!hit || !rule_head_unfolds(h->m_info, f)) {
-        if (m_diag && !hit)
+    if (!hit) {
+        if (m_diag)
             m_diag->record_unfold(rbd_diag_name(site, 0));
         return none_expr();
     }
-    rewrite_fuel_scope fuel(*this);
-    flet<bool> syntactic(m_rewrite_syntactic, !before_delta_retry());
+    flet<bool> syntactic(m_rewrite_syntactic, true);
     if (!several) {
         optional<expr> r = fire_first_rule(hit->m_rules, f, args);
         if (m_diag)
             m_diag->record_unfold(rbd_diag_name(site, r ? 2 : 1));
         return r;
     }
-    /* several keys match: their rules together, in firing order */
+    /* several keys match: their rules together, in firing order; the arguments at their key positions
+       are in their final form already */
     std::vector<rewrite_rule> rules;
     for (rewrite_pre_group const & g : h->m_groups) {
-        if (g.m_pos != UINT_MAX && (g.m_pos >= args.size() || !is_constant(get_app_fn(args[g.m_pos])) ||
-                                    const_name(get_app_fn(args[g.m_pos])) != g.m_const))
+        if (g.m_pos != UINT_MAX && (g.m_pos >= args.size() || !key_matches(g, args[g.m_pos])))
             continue;
         rules.insert(rules.end(), g.m_rules.begin(), g.m_rules.end());
     }
@@ -901,7 +940,6 @@ static bool is_let_fvar(local_ctx const & lctx, expr const & e) {
     We also do not cache results. */
 expr type_checker::whnf_core(expr const & e, bool cheap_rec, bool cheap_proj) {
     scope_rec_depth guard;
-    rewrite_fuel_scope fuel(*this);
     check_system("type checker: whnf", /* do_check_interrupted */ true);
 
     // handle easy cases
@@ -1189,7 +1227,6 @@ expr type_checker::whnf(expr const & e) {
         if (auto r = xdecl_find(&xdecl_cache::generation::m_whnf, e))
             return *r;
 
-    rewrite_fuel_scope fuel(*this);
     expr t = e;
     optional<expr> origin;
     while (true) {
@@ -1730,7 +1767,6 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
     auto rules_last = [&]() {
         if (!t_origin && !s_origin)
             return false;
-        rewrite_fuel_scope fuel(*this);
         optional<expr> t_r = t_origin && is_stuck_result(t_n) ? reduce_rewrite(*t_origin, true) : none_expr();
         optional<expr> s_r = s_origin && is_stuck_result(s_n) ? reduce_rewrite(*s_origin, true) : none_expr();
         return (t_r || s_r) && is_def_eq_core(t_r ? *t_r : t_n, s_r ? *s_r : s_n);
