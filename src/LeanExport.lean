@@ -49,12 +49,42 @@ partial def dropsTo (env : Environment) (drop : NameSet) (c : Name) (memo : Std.
         break
     return (d, memo.insert c d)
 
+/-- The build githash in the header of an `.olean` file (bytes 40 to 79), empty for a Lean built
+without one. -/
+def oleanGithash (f : System.FilePath) : IO String := do
+  let h ← IO.FS.Handle.mk f .read
+  let b ← h.read 80
+  let bytes := (b.extract 40 80).toList.takeWhile (· != 0)
+  return String.ofList (bytes.map fun c => Char.ofNat c.toNat)
+
+/--
+Fails unless every module of the closure was compiled by the same Lean build. A loader built without
+`CHECK_OLEAN_VERSION`, such as this one, reads `.olean` files of any build, and a closure that takes
+`Init` and `Lean` from one toolchain and a library compiled against another is not well typed. A
+structure instance elaborated against one version of `Lean.Meta.Context` then misses the fields the
+other version adds, and every kernel rejects the declaration with an application type mismatch.
+-/
+def checkOneBuild (env : Environment) : IO Unit := do
+  let mut first : Option (Name × String) := none
+  for mod in env.header.moduleNames do
+    let f ← findOLean mod
+    unless ← f.pathExists do continue
+    let g ← oleanGithash f
+    match first with
+    | none => first := some (mod, g)
+    | some (m₀, g₀) =>
+      unless g == g₀ do
+        throw <| .userError s!"modules from different Lean builds: {m₀} has githash '{g₀}' and \
+          {mod} has '{g}' ({f}). Put the lib/lean of the toolchain that compiled the library \
+          first in LEAN_PATH."
+
 def main (args : List String) : IO Unit := do
   initSearchPath (← findSysroot)
   let (opts, args) := args.partition (fun s => s.startsWith "--" && s.length ≥ 3)
   let (imports, constants) := args.span (· != "--")
   let imports := imports.toArray.map fun mod => { module := Syntax.decodeNameLit ("`" ++ mod) |>.get! }
   let env ← importModules imports {}
+  checkOneBuild env
   let constants? := constants.tail?.map fun cs =>
     cs.map fun c => Syntax.decodeNameLit ("`" ++ c) |>.get!
   -- `LEANEXPORT_RULES=file` (one theorem per line, optional priority, optional `↓` for a rule that
@@ -98,6 +128,10 @@ def main (args : List String) : IO Unit := do
   -- `LEANEXPORT_DROP=file` leaves these declarations out, with everything that depends on them, for
   -- checkers that accept no axioms
   let drop := (← readLines "LEANEXPORT_DROP").foldl (fun s l => s.insert (toName l.trimAscii.toString)) ({} : NameSet)
+  -- `LEANEXPORT_CONSTANTS=file` exports these constants and their dependencies, for lists too long
+  -- for the command line and for private names, which the command line does not parse
+  let listed := (← readLines "LEANEXPORT_CONSTANTS").map (toName ·.trimAscii.toString)
+  let constants? := if listed.isEmpty then constants? else some (constants?.getD [] ++ listed.toList)
   let constants? ← if drop.isEmpty then pure constants? else do
     let all := constants?.getD (env.constants.toList.map Prod.fst |>.filter (!·.isInternal))
     let mut memo : Std.HashMap Name Bool := {}
