@@ -756,9 +756,7 @@ def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
 
 /-- Whether the head of `e` is a constructor or `e` is a literal. -/
 private def isConstructorForm (env : Environment) (e : Expr) : Bool :=
-  e.isLit || match e.getAppFn with
-    | .const c _ => env.find? c matches some (.ctorInfo _)
-    | _ => false
+  e.isLit || e.getAppFn.constName?.any fun c => (env.find? c matches some (.ctorInfo _))
 
 /--
 The key test of a rule with key constant `c` on the argument `a` at its key position. A `Nat` literal
@@ -802,7 +800,7 @@ def reduceRewriteBeforeDelta? (e : Expr) : MetaM (Option Expr) := do
     if ok then
       hits := hits.push r
       continue
-    unless env.find? r.keyConst matches some (.ctorInfo _) do continue
+    unless (env.find? r.keyConst matches some (.ctorInfo _)) do continue
     if isConstructorForm env a then continue
     let (ok, a) := rewriteKeyMatches r.keyConst (← whnf a)
     args := args.set! p a
