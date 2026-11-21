@@ -143,29 +143,29 @@ kernel_rfl z_kernel' : ∀ l, z (id 0) l = (l, 0)
 
 /-! ## A rule on `cond` fires on a key argument that computes -/
 
-def isTrue (_ : List Nat) : Bool := true
-def isFalse (_ : List Nat) : Bool := false
+def yes (_ : List Nat) : Bool := true
+def no (_ : List Nat) : Bool := false
 
-@[rewrite ↓] theorem cond_tt {α : Type u} (a b : α) : cond true a b = a := rfl
+@[rewrite ↓] theorem cond_tt {α : Sort u} (a b : α) : cond true a b = a := rfl
 
--- `isTrue l` is reduced to `true` before the key test, so `cond_tt` fires. With no firing left in
+-- `yes l` is reduced to `true` before the key test, so `cond_tt` fires. With no firing left in
 -- the budget the elaborator reports it.
 /-- error: rewrite rule budget exhausted: `cond_tt` would fire past 0 firings in this declaration -/
 #guard_msgs in
 set_option maxRewriteFirings 0 in
 rewrite_rules cond_tt in
-example (l : List Nat) : cond (isTrue l) l [] = l := rfl
+example (l : List Nat) : cond (yes l) l [] = l := rfl
 
--- `isFalse l` is reduced to `false`, which no rule has as its key, so `cond` unfolds
+-- `no l` is reduced to `false`, which no rule has as its key, so `cond` unfolds
 set_option maxRewriteFirings 0 in
 rewrite_rules cond_tt in
-example (l : List Nat) : cond (isFalse l) [] l = l := rfl
+example (l : List Nat) : cond (no l) [] l = l := rfl
 
 rewrite_rules cond_tt in
-example (l : List Nat) : cond (isTrue l) l [] = l := rfl
+example (l : List Nat) : cond (yes l) l [] = l := rfl
 
 rewrite_rules cond_tt in
-kernel_rfl cond_kernel : ∀ l, cond (isTrue l) l [] = l
+kernel_rfl cond_kernel : ∀ l, cond (yes l) l [] = l
 
 /-! ## A list fold -/
 
@@ -200,9 +200,9 @@ def loopB (n : Nat) : Nat := n
 @[rewrite ↓] theorem loopA_B (n : Nat) : loopA n = loopB n := rfl
 @[rewrite ↓] theorem loopB_A (n : Nat) : loopB n = loopA n := rfl
 
-/-- error: rewrite rule budget exhausted: `loopA_B` would fire past 1000 firings in this declaration -/
+/-- error: rewrite rule budget exhausted: `loopA_B` would fire past 100 firings in this declaration -/
 #guard_msgs in
-set_option maxRewriteFirings 1000 in
+set_option maxRewriteFirings 100 in
 rewrite_rules loopA_B loopB_A in
 example : loopA 0 = 0 := rfl
 
@@ -261,7 +261,7 @@ run_meta do
 #guard_msgs in
 run_meta do
   let l := toExpr [(1 : Nat)]
-  let e := mkApp2 (mkConst ``p) (mkApp (mkConst ``isTrue) l) l
+  let e := mkApp2 (mkConst ``p) (mkApp (mkConst ``yes) l) l
   let r1 ← withRules #[] (whnf e)
   let r2 ← withRules #[``p_true] (whnf e)
   let r3 ← withRules #[] (whnf e)
