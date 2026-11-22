@@ -554,6 +554,15 @@ def failIfSucceeds (x : CommandElabM Unit) : CommandElabM Unit := do
     | .ok env => setEnv env
     | .error ex => throwError ex.toMessageData (← getOptions)
 
+@[builtin_command_elab Parser.Command.unfoldingAbstract] def elabUnfoldingAbstract : CommandElab := fun stx => do
+  for id in stx[1].getArgs do
+    let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
+    unless (← getEnv).isAbstract c do
+      throwErrorAt id "`{.ofConstName c}` is not abstract, only definitions made abstract by an \
+        `abstract_block` can be reopened"
+    for g in (← getEnv).abstractUnfoldingClosure c do
+      unfoldingScopeExt.add g .local
+
 open Lean.Parser.Command.InternalSyntax in
 @[builtin_macro Lean.Parser.Command.«in»] def expandInCmd : Macro
   | `($cmd₁ in%$tk $cmd₂) =>

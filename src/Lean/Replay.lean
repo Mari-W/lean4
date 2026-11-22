@@ -34,6 +34,11 @@ structure Context where
   newConstants : Std.HashMap Name ConstantInfo
   /-- The rewrite rules of the source, registered again as their theorems are replayed. -/
   rewrites : Rewrites := {}
+  /--
+  For each new constant, the abstract definitions of the target that it is a member of in the
+  source but not in the target (`unfolding_abstract` in a later module).
+  -/
+  addedMembers : Std.HashMap Name (Array Name) := {}
 
 structure State where
   env : Kernel.Environment
@@ -64,6 +69,8 @@ it.
 -/
 def addDecl (name : Name) (d : Declaration) : M Unit := do
   let rules := (← read).rewrites.sets.findD name #[]
+  for c in (← read).addedMembers.getD name #[] do
+    modify fun s => { s with env := s.env.addAbstractMember c name }
   match (← get).env.addDeclCore 0 0 d (cancelTk? := none) rules with
   | .ok env => modify fun s => { s with env := env }
   | .error ex => throwKernelException ex
@@ -203,8 +210,16 @@ public def replay (newConstants : Std.HashMap Name ConstantInfo) (env : Kernel.E
     -- Later we may want to handle partial constants.
     if !ci.isUnsafe && !ci.isPartial then
       remaining := remaining.insert n
+  -- members added to abstract definitions of the target, which are not replayed themselves
+  let addedMembers := rewrites.abstracts.fold (init := ({} : Std.HashMap Name (Array Name)))
+      fun acc c members =>
+        match env.abstractMembers? c with
+        | none => acc
+        | some old => members.foldl (init := acc) fun acc m =>
+          if newConstants.contains m && !old.contains m then acc.insert m ((acc.getD m #[]).push c)
+          else acc
   let (_, s) ← StateRefT'.run (s := { env, remaining }) do
-    ReaderT.run (r := { newConstants, rewrites }) do
+    ReaderT.run (r := { newConstants, rewrites, addedMembers }) do
       for n in remaining do
         replayConstant n
       checkPostponedConstructors

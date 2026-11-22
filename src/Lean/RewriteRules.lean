@@ -40,6 +40,27 @@ builtin_initialize rewriteScopeExt : ScopedEnvExtension Name Name (Array Name) â
 def getExplicitRewriteRules (env : Environment) : Array Name :=
   Kernel.canonRewriteSet (rewriteScopeExt.getState env)
 
+/--
+Abstract definitions reopened by `unfolding_abstract` in the current scope. They unfold in the
+elaborator, and every declaration added in the scope becomes a member of each of them, so that the
+kernel unfolds them there too.
+-/
+builtin_initialize unfoldingScopeExt : ScopedEnvExtension Name Name NameSet â†
+  registerScopedEnvExtension {
+    mkInitial    := pure {}
+    ofOLeanEntry := fun _ n => pure n
+    toOLeanEntry := id
+    addEntry     := fun s n => s.insert n
+  }
+
+/--
+Whether `c` is abstract at this point of the elaboration: an abstract definition (`abstract_block`)
+that `unfolding_abstract` does not reopen in the current scope.
+-/
+def Environment.isAbstractHere (env : Environment) (c : Name) : Bool :=
+  -- type class resolution records no dependency on the scope, so it never sees a reopened body
+  env.isAbstract c && (env.isRecordingDeps || !(unfoldingScopeExt.getState env).contains c)
+
 /-- The constants of the statements and values of `decl`, from which `R(D)` is closed. -/
 def Declaration.rewriteConsts (decl : Declaration) : Array Name :=
   let es : Array Expr := match decl with

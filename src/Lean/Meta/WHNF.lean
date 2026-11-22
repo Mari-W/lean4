@@ -89,14 +89,15 @@ def isAuxDef (constName : Name) : MetaM Bool := do
 /--
 Retrieves `ConstInfo` for `declName`.
 Remark: if `ignoreTransparency = false`, then `getUnfoldableConst?` is used. An abstract definition
-outside its block is never returned.
+outside its block is returned only where `unfolding_abstract` reopens it.
 For example, if `ignoreTransparency = false` and `transparencyMode = .reducible` and `declName` is not reducible,
 then the result is `none`.
 -/
 private def getConstInfo? (declName : Name) (ignoreTransparency : Bool) : MetaM (Option ConstantInfo) := do
   if ignoreTransparency then
-    -- an abstract definition never unfolds outside its block, whatever the transparency
-    if (← getEnv).isAbstract declName then return none
+    -- an abstract definition unfolds only in its block and where it is reopened, whatever the
+    -- transparency
+    if (← getEnv).isAbstractHere declName then return none
     return (← getEnv).find? declName
   else
     getUnfoldableConst? declName
@@ -106,8 +107,9 @@ Similar to `getConstInfo?` but using `getUnfoldableConstNoEx?`.
 -/
 private def getConstInfoNoEx? (declName : Name) (ignoreTransparency : Bool) : MetaM (Option ConstantInfo) := do
   if ignoreTransparency then
-    -- an abstract definition never unfolds outside its block, whatever the transparency
-    if (← getEnv).isAbstract declName then return none
+    -- an abstract definition unfolds only in its block and where it is reopened, whatever the
+    -- transparency
+    if (← getEnv).isAbstractHere declName then return none
     return (← getEnv).find? declName
   else
     getUnfoldableConstNoEx? declName
@@ -750,7 +752,7 @@ def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
   if registered.isEmpty then
     return none
   -- as in the kernel, a rule on a head that unfolds fires only when its unfolding got stuck
-  if !stuck && (env.find? f).any (·.hasValue) && !env.isAbstract f then
+  if !stuck && (env.find? f).any (·.hasValue) && !env.isAbstractHere f then
     return none
   fireFirstRewrite e.getAppArgs us (← activeRewriteRules (registered.filterMap env.rewriteRule?)) false
 

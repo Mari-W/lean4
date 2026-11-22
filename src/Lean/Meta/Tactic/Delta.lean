@@ -12,9 +12,9 @@ namespace Lean.Meta
 
 def delta? (e : Expr) (p : Name → Bool := fun _ => true) (allowOpaque := false) : CoreM (Option Expr) :=
   matchConst e.getAppFn (fun _ => return none) fun fInfo fLvls => do
-    -- an abstract definition never unfolds outside its block, as in the kernel
+    -- an abstract definition unfolds only in its block and where it is reopened, as in the kernel
     if p fInfo.name && fInfo.hasValue (allowOpaque := allowOpaque) && fInfo.levelParams.length == fLvls.length &&
-        !(← getEnv).isAbstract fInfo.name then
+        !(← getEnv).isAbstractHere fInfo.name then
       let f ← instantiateValueLevelParams fInfo fLvls (allowOpaque := allowOpaque)
       return some (f.betaRev e.getAppRevArgs (useZeta := true))
     else

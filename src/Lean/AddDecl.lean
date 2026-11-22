@@ -128,6 +128,10 @@ private def addDeclCore (decl : Declaration) (forceExpose : Bool) : CoreM Unit :
 
   let rules := getExplicitRewriteRules (← getEnv)
   modifyEnv (recordRewriteSets decl rules)
+  -- the abstract definitions reopened by `unfolding_abstract` gain the declaration as a member
+  for c in unfoldingScopeExt.getState (← getEnv) do
+    for n in decl.getNames do
+      modifyEnv (·.addAbstractMember c n)
 
   -- convert `Declaration` to `ConstantInfo` to use as a preliminary value in the environment until
   -- kernel checking has finished; not all cases are supported yet

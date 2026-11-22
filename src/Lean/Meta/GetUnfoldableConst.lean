@@ -80,8 +80,8 @@ def getUnfoldableConst? (constName : Name) : MetaM (Option ConstantInfo) := do
   match ainfo.kind with
   | .thm => return none
   | .defn =>
-    -- an abstract definition never unfolds outside its block, as in the kernel
-    if (← getEnv).isAbstract constName then return none
+    -- an abstract definition unfolds only in its block and where it is reopened, as in the kernel
+    if (← getEnv).isAbstractHere constName then return none
     if (← canUnfold ainfo.toConstantInfo) then return ainfo.toConstantInfo else return none
   | _ => return none
 
@@ -92,7 +92,7 @@ def getUnfoldableConstNoEx? (constName : Name) : MetaM (Option ConstantInfo) := 
   match (← getEnv).find? constName with
   | some (.thmInfo _)          => return none
   | some (info@(.defnInfo _)) =>
-    if (← getEnv).isAbstract constName then return none
+    if (← getEnv).isAbstractHere constName then return none
     if (← canUnfold info) then return info else return none
   | some (.axiomInfo _)       => recordUnfoldAxiom constName; return none
   | _                         => return none

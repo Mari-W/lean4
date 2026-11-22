@@ -133,7 +133,11 @@ structure ModuleRewrite where
   declIdx : Array Nat := #[]
   /-- For each entry of `declIdx`, the index of its rule set in `sets`. -/
   declSet : Array Nat := #[]
-  /-- Abstract definitions registered in this module, each with the declarations that may unfold it. -/
+  /--
+  Abstract definitions registered in this module, each with the declarations that may unfold it,
+  and members added in this module (`unfolding_abstract`) to abstract definitions of this or an
+  earlier module. A definition may occur more than once, and its members are the union.
+  -/
   abstracts : Array (Name × Array Name) := #[]
   deriving Inhabited
 
@@ -248,10 +252,11 @@ structure Rewrites where
   newRules : Array RewriteRule := #[]
   /--
   The abstract definitions, each with the declarations that may unfold it, the members of its
-  `abstract` block. Every other declaration sees the definition as stuck.
+  `abstract` block and the declarations elaborated under `unfolding_abstract`. Every other
+  declaration sees the definition as stuck.
   -/
   abstracts : SMap Name (Array Name) := SMap.empty.switch
-  /-- Abstract definitions registered since the import, in registration order. -/
+  /-- Abstract definitions and added members registered since the import, in registration order. -/
   newAbstracts : Array (Name × Array Name) := #[]
   /-- The rules that fire before unfolding (`beforeDelta`), by head constant, for the elaborator. -/
   preByHead : SMap Name (Array RewriteRule) := SMap.empty.switch
@@ -555,12 +560,22 @@ def abstractMembers? (env : Environment) (c : Name) : Option (Array Name) :=
 def isAbstract (env : Environment) (c : Name) : Bool :=
   (env.abstractMembers? c).isSome
 
+/--
+The abstract definitions with their members. A definition imported as abstract and given further
+members here (`addAbstractMember`) has an entry in both stages of the map, and the newer one counts.
+-/
+def abstractList (env : Environment) : Array (Name × Array Name) :=
+  let a := env.rewrites.abstracts
+  let imported := a.map₁.fold (init := #[]) fun acc c members =>
+    if a.map₂.contains c then acc else acc.push (c, members)
+  a.map₂.foldl (fun acc c members => acc.push (c, members)) imported
+
 /-- The abstract definitions that the declaration `decl` may not unfold, for the kernel. -/
 @[export lean_kernel_blocked_abstracts]
 def blockedAbstracts (env : Environment) (decl : Name) : Array Name :=
   let a := env.rewrites.abstracts
   if a.map₁.isEmpty && a.map₂.isEmpty then #[] else
-    a.fold (init := #[]) fun acc c members => if members.contains decl then acc else acc.push c
+    env.abstractList.filterMap fun (c, members) => if members.contains decl then none else some c
 
 /-- Records `c` as abstract with the given members, without checks. -/
 def recordAbstract (env : Environment) (c : Name) (members : Array Name) : Environment :=
@@ -578,6 +593,20 @@ def addAbstract (env : Environment) (c : Name) (members : Array Name) : Except E
   if env.isAbstract c then
     throw <| .other s!"'{c}' is already abstract"
   return env.recordAbstract c members
+
+/--
+Lets the declaration `d` unfold the abstract definition `c`, as `unfolding_abstract c` does for the
+declarations of its scope. Does nothing if `c` is not abstract or `d` already is a member. The new
+member is stored with the module, and importing modules append it to the members of `c`.
+-/
+def addAbstractMember (env : Environment) (c d : Name) : Environment :=
+  match env.abstractMembers? c with
+  | none => env
+  | some members =>
+    if members.contains d then env else
+      { env with rewrites := { env.rewrites with
+        abstracts    := env.rewrites.abstracts.insert c (members.push d)
+        newAbstracts := env.rewrites.newAbstracts.push (c, #[d]) } }
 
 
 @[export lean_environment_add]
@@ -1195,6 +1224,23 @@ def abstractMembers? (env : Environment) (c : Name) : Option (Array Name) :=
   env.base.private.abstractMembers? c
 
 /--
+The abstract definitions that unfolding `c` reopens: `c` and, transitively, the abstract
+definitions that have one of them as a member. The body of `c` was checked with these unfolded, so
+terms built from it may need them.
+-/
+def abstractUnfoldingClosure (env : Environment) (c : Name) : Array Name := Id.run do
+  let abstracts := env.base.private.abstractList
+  let mut out := #[c]
+  let mut i := 0
+  while i < out.size do
+    let d := out[i]!
+    for (g, members) in abstracts do
+      if members.contains d && !out.contains g then
+        out := out.push g
+    i := i + 1
+  return out
+
+/--
 Makes the definition `c` abstract, see `Kernel.Environment.addAbstract`. The kernel and the
 elaborator both record it.
 -/
@@ -1204,6 +1250,12 @@ def addAbstract (env : Environment) (c : Name) (members : Array Name) :
     throw <| .other s!"'{c}' is already abstract"
   let env := env.modifyCheckedAsync (·.recordAbstract c members)
   return { env with base.private := env.base.private.recordAbstract c members }
+
+@[inherit_doc Kernel.Environment.addAbstractMember]
+def addAbstractMember (env : Environment) (c d : Name) : Environment :=
+  if !env.isAbstract c then env else
+    let env := env.modifyCheckedAsync (·.addAbstractMember c d)
+    { env with base.private := env.base.private.addAbstractMember c d }
 
 /-- The kernel's rule set `R(n)`, waiting for all prior declarations to be checked. -/
 def kernelRewriteSet (env : Environment) (n : Name) : Array Name :=
@@ -3043,8 +3095,9 @@ def Kernel.Rewrites.ofModuleData (mods : Array ModuleData) : Kernel.Rewrites := 
   let mut abstracts : Std.HashMap Name (Array Name) := {}
   let mut preByHead : Std.HashMap Name (Array RewriteRule) := {}
   for data in mods do
+    -- a later module may list further members of a definition made abstract earlier
     for (c, members) in data.rewrites.abstracts do
-      abstracts := abstracts.insert c members
+      abstracts := abstracts.insert c (abstracts.getD c #[] ++ members)
     for r in data.rewrites.rules do
       unless rules.contains r.thm do
         rules := rules.insert r.thm r

@@ -924,11 +924,21 @@ they use were checked under. `rewrite_rules h₁ … hₙ in <command>` does so 
 /--
 `abstract_block … end` makes the definitions of the block abstract when the block ends. Inside the
 block they unfold as usual, so equations about them can be proved there. Everywhere else they are
-stuck, and only their rewrite rules compute with them.
+stuck, and only their rewrite rules compute with them, unless `unfolding_abstract` reopens them.
 -/
 @[builtin_command_parser] def abstractBlock := leading_parser
   "abstract_block" >> many1 (ppLine >> notSymbol "end" >> commandParser) >>
   ppDedent (ppLine >> "end")
+
+/--
+`unfolding_abstract f₁ … fₙ` reopens the abstract definitions `f₁ … fₙ` (`abstract_block`) for the
+declarations of the current section, as `unfolding` does in Agda. They unfold there in the
+elaborator and in the kernel, because each of these declarations becomes a member of their blocks.
+`unfolding_abstract f₁ … fₙ in <command>` does so for a single command. Reopening `f` also reopens
+the abstract definitions that `f` may unfold.
+-/
+@[builtin_command_parser] def unfoldingAbstract := leading_parser
+  "unfolding_abstract" >> many1 (ppSpace >> checkColGt >> ident)
 
 @[builtin_command_parser] def «in»  := trailing_parser
   withOpen (withSetOption (ppDedent (" in" >> ppLine >> commandParser)))
