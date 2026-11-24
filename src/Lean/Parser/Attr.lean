@@ -48,11 +48,14 @@ namespace Attr
 @[builtin_attr_parser] def default_instance := leading_parser nonReservedSymbol "default_instance" >> optional (ppSpace >> priorityParser)
 @[builtin_attr_parser] def «specialize»     := leading_parser (nonReservedSymbol "specialize") >> many (ppSpace >> (ident <|> numLit))
 /- Kernel rewrite rules. As in `@[simp ↓]`, `↓` makes the rule fire first, here before the kernel
-unfolds the rule's head, and the optional priority comes last. -/
+unfolds the rule's head, `kernel` keeps the rule out of the elaborator, and the optional priority
+comes last. -/
 @[builtin_attr_parser] def «rewrite»        := leading_parser
-  "rewrite" >> optional (ppSpace >> "↓") >> optional (ppSpace >> priorityParser)
+  "rewrite" >> optional (ppSpace >> "↓") >> optional (ppSpace >> nonReservedSymbol "kernel") >>
+    optional (ppSpace >> priorityParser)
 @[builtin_attr_parser] def global_rewrite   := leading_parser
-  nonReservedSymbol "global_rewrite" >> optional (ppSpace >> "↓") >> optional (ppSpace >> priorityParser)
+  nonReservedSymbol "global_rewrite" >> optional (ppSpace >> "↓") >>
+    optional (ppSpace >> nonReservedSymbol "kernel") >> optional (ppSpace >> priorityParser)
 
 def externEntry := leading_parser
   optional (ident >> ppSpace) >> optional (nonReservedSymbol "inline ") >> strLit

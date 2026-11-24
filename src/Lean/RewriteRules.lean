@@ -41,6 +41,28 @@ def getExplicitRewriteRules (env : Environment) : Array Name :=
   Kernel.canonRewriteSet (rewriteScopeExt.getState env)
 
 /--
+Rules registered with `@[rewrite kernel]` or `@[global_rewrite kernel]`. They are ordinary rules for
+the kernel, the `.olean` file, `leanchecker` and `leanexport`, but the elaborator never fires them
+(`Meta.getActiveRewriteRules` leaves them out), so elaboration is the same as without them.
+-/
+builtin_initialize kernelOnlyRewriteExt : ScopedEnvExtension Name Name NameSet ←
+  registerScopedEnvExtension {
+    mkInitial    := pure {}
+    ofOLeanEntry := fun _ n => pure n
+    toOLeanEntry := id
+    addEntry     := fun s n => s.insert n
+  }
+
+/-- The rules registered with `@[rewrite kernel]`, which only the kernel fires. -/
+def getKernelOnlyRewriteRules (env : Environment) : NameSet :=
+  kernelOnlyRewriteExt.getState env
+
+/-- Removes the rules that only the kernel fires (`@[rewrite kernel]`) from the rule set `s`. -/
+def withoutKernelOnlyRewrites (env : Environment) (s : Array Name) : Array Name :=
+  let ko := getKernelOnlyRewriteRules env
+  if ko.isEmpty then s else s.filter (!ko.contains ·)
+
+/--
 Abstract definitions reopened by `unfolding_abstract` in the current scope. They unfold in the
 elaborator, and every declaration added in the scope becomes a member of each of them, so that the
 kernel unfolds them there too.
@@ -98,29 +120,41 @@ def getRewriteRuleInfo? (env : Environment) (thm : Name) : Option RewriteRuleInf
   | _ => none
 
 /--
-Reads the arguments of `@[rewrite ↓ p]` or `@[global_rewrite ↓ p]`: whether `↓` is given and the
-priority, and registers `declName` as a rule unless it already is one. Applying the attribute to a
-registered rule changes nothing, so a given `↓` or priority must agree with the registered rule.
+Reads the arguments of `@[rewrite ↓ kernel p]` or `@[global_rewrite ↓ kernel p]`: whether `↓` and
+`kernel` are given and the priority, and registers `declName` as a rule unless it already is one.
+Applying the attribute to a registered rule changes nothing, so a given `↓`, `kernel` or priority
+must agree with the registered rule.
 -/
 private def addRewriteAttr (declName : Name) (stx : Syntax) : AttrM Unit := do
-  let (bdStx, prioStx) :=
-    if stx.getKind == `Lean.Parser.Attr.simple then (Syntax.missing, stx[1]) else (stx[1], stx[2])
-  let beforeDelta := !bdStx.isNone && !bdStx.isMissing
+  let given (s : Syntax) := !s.isNone && !s.isMissing
+  let (beforeDelta, kernelOnly, prioStx) :=
+    if stx.getKind == `Lean.Parser.Attr.simple then
+      -- `@[global_rewrite kernel]` may also parse as a simple attribute with the argument `kernel`
+      if stx[1][0].isIdent && stx[1][0].getId == `kernel then (false, true, Syntax.missing)
+      else (false, false, stx[1])
+    else (given stx[1], given stx[2], stx[3])
   let prio ← getAttrParamOptPrio prioStx
   match (← getEnv).rewriteRule? declName with
   | some rule =>
-    unless rule.prio == prio || prioStx.isNone do
+    unless rule.prio == prio || prioStx.isNone || prioStx.isMissing do
       throwError "`{.ofConstName declName}` is already a rewrite rule with priority {rule.prio}"
     if beforeDelta && !rule.beforeDelta then
       throwError "`{.ofConstName declName}` is already a rewrite rule that fires only when unfolding its head gets stuck"
-  | none => setEnv (← ofExceptKernelException ((← getEnv).addRewriteRule declName prio beforeDelta))
+    if kernelOnly && !(getKernelOnlyRewriteRules (← getEnv)).contains declName then
+      throwError "`{.ofConstName declName}` is already a rewrite rule that the elaborator fires"
+  | none =>
+    setEnv (← ofExceptKernelException ((← getEnv).addRewriteRule declName prio beforeDelta))
+    if kernelOnly then
+      kernelOnlyRewriteExt.add declName .global
 
 /-
 `@[rewrite p]` registers a theorem `∀ xs, l = r` as a kernel rewrite rule with priority `p`
 (default 1000). `@[scoped rewrite]` and `@[local rewrite]` also put the rule in force for the
 declarations of the scope. Applying the attribute to a registered rule only does the latter.
 `@[rewrite ↓]` registers a rule that fires before its head is unfolded. Any other rule on a head
-that unfolds fires only where the unfolding gets stuck.
+that unfolds fires only where the unfolding gets stuck. `@[rewrite kernel]` registers a rule that
+only the kernel fires: the elaborator's `whnf`, `isDefEq`, `simp`, `dsimp` and `decide` ignore it,
+also in the modules that inherit it.
 -/
 builtin_initialize
   registerBuiltinAttribute {

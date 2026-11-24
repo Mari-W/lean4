@@ -2697,7 +2697,8 @@ def isLevelDefEq (u v : Level) : MetaM Bool :=
 /--
 The rewrite rules Meta fires: the canonical rule set in `Context.rewriteSet?`, or the closure of
 the explicit rules of the scope. No rules fire during type class resolution, whose cache records
-no dependency on rule sets.
+no dependency on rule sets. Rules registered with `@[rewrite kernel]` are never active here, only
+the kernel fires them.
 -/
 def getActiveRewriteRules : MetaM (Array Name) := do
   let env ← getEnv
@@ -2705,7 +2706,7 @@ def getActiveRewriteRules : MetaM (Array Name) := do
     return #[]
   if let some s := (← read).rewriteSet? then
     return s
-  return env.closeRewriteSet (getExplicitRewriteRules env) #[]
+  return withoutKernelOnlyRewrites env (env.closeRewriteSet (getExplicitRewriteRules env) #[])
 
 /--
 The bits that the whnf and defeq caches add to a key's `configKey` for the rule set `s`: a 40-bit
@@ -2725,7 +2726,8 @@ def getRewriteCacheBits : MetaM UInt64 :=
 
 /--
 The rule set the kernel would use for a declaration containing `t` and `s`: the explicit rules of
-the scope and of the enclosing problem, closed with the rule sets of the constants of `t` and `s`.
+the scope and of the enclosing problem, closed with the rule sets of the constants of `t` and `s`,
+without the rules that only the kernel fires.
 -/
 private def mkRewriteSetFor? (t s : Expr) : MetaM (Option (Array Name)) := do
   let env ← getEnv
@@ -2733,7 +2735,7 @@ private def mkRewriteSetFor? (t s : Expr) : MetaM (Option (Array Name)) := do
     return none
   let outer := (← read).rewriteSet?.getD #[]
   let consts := t.foldConsts (s.foldConsts #[] fun c cs => cs.push c) fun c cs => cs.push c
-  return some (env.closeRewriteSet (outer ++ getExplicitRewriteRules env) consts)
+  return some (withoutKernelOnlyRewrites env (env.closeRewriteSet (outer ++ getExplicitRewriteRules env) consts))
 
 /-- See `isDefEq`. -/
 def isExprDefEq (t s : Expr) : MetaM Bool := do

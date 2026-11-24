@@ -1712,6 +1712,9 @@ that the two sides keep the same shape, as in the kernel.
 -/
 private def rewriteBothBeforeDelta? (t s : Expr) : MetaM (Option (Expr × Expr)) := do
   unless (← getEnv).hasPreRewriteRules do return none
+  let .const f _ := t.getAppFn | return none
+  if ((← getEnv).preRewriteRulesFor? f).isNone then return none
+  if (← getActiveRewriteRules).isEmpty then return none
   unless (← unfoldDefinition? t).isSome && (← unfoldDefinition? s).isSome do return none
   let some t' ← reduceRewriteBeforeDelta? t | return none
   let some s' ← reduceRewriteBeforeDelta? s | return none
@@ -2524,6 +2527,8 @@ with `whnf`, which fires a rule where unfolding gets stuck. Only if a rule fired
 private def isDefEqRulesLast (t s : Expr) : MetaM Bool := do
   unless (← getEnv).hasRewriteRules do return false
   unless (← hasRewriteHead t) || (← hasRewriteHead s) do return false
+  -- no rule can fire, for example because all rules in force are kernel-only (`@[rewrite kernel]`)
+  if (← getActiveRewriteRules).isEmpty then return false
   let before := (← get).rewriteTotal
   let t' ← whnf t
   let s' ← whnf s
