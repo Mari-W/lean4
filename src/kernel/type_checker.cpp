@@ -52,6 +52,296 @@ static expr * g_nat_xor      = nullptr;
 static expr * g_nat_shiftLeft  = nullptr;
 static expr * g_nat_shiftRight = nullptr;
 
+/* ---- Wasted unfolding (rewrite-rules/perf, experiment). Counters only, kernel decisions unchanged.
+   Enabled when LEAN_KERNEL_DELTA_WASTE names an output file. It measures user-space instructions with
+   rdpmc and attributes them as follows.
+   - A delta step is one unfolding of a definition together with the `whnf_core` that follows it (beta,
+     projections of constructors): `unfold_definition` in `whnf`, `unfold_lazy` and the unfolding of both
+     sides in `lazy_delta_reduction_step`. Its instructions are exclusive: nested `whnf`, `infer_type`
+     and `is_def_eq_core` calls are left out, and nested delta steps count for their own constants.
+   - An attempt is a call of `is_def_eq_core`, of `is_def_eq_args` in the lazy delta step, of
+     `is_def_eq_app`, of `lazy_delta_proj_reduction`, or the `whnf t = Bool.true` test of `is_def_eq_core`.
+     An attempt that answers `false` (the test: does not give `Bool.true`) is failed. A delta step or an
+     instruction is wasted if it ran inside a failed attempt: the check then continued another way, so
+     nothing it computed decided the declaration, except through the caches.
+   - `is_def_eq_proof_irrel` returning `l_undef` (the terms are not proofs) is counted apart.
+   The hooks `lean_kernel_census_dump(decl)` and `lean_kernel_census_close()` (called by kreplay with
+   KREPLAY_CENSUS set) write one line per declaration and, at the end, one line per constant.
+   LEAN_KERNEL_DELTA_WASTE_SKIP names a file of declarations (first tab field) left out of the totals. */
+}
+#include <unordered_map>
+#include <unordered_set>
+#include <sstream>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <exception>
+#include <linux/perf_event.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+namespace lean { namespace dwaste {
+static int g_on = -1;
+static FILE * g_out = nullptr;
+static uint64_t now();
+static LEAN_THREAD_LOCAL int g_fd = -2;
+static LEAN_THREAD_LOCAL perf_event_mmap_page * g_pc = nullptr;
+static std::unordered_set<std::string> * g_skip = nullptr;
+static inline bool on() {
+    if (g_on < 0) {
+        char const * p = getenv("LEAN_KERNEL_DELTA_WASTE");
+        g_on = 0;
+        if (p && (g_out = fopen(p, "w"))) {
+            g_on = 1;
+            fprintf(g_out, "#decl\tdecl\tdelta_used_n\tdelta_wasted_n\tdelta_pi_n\tdelta_used_i\tdelta_wasted_i\tdelta_pi_i\t"
+                    "wasted_i\tpi_undef_i\tw_core\tw_args\tw_app\tw_proj\tw_booltrue\tattempts\tfailed\tpi_calls\tpi_undef\tpi_i\n");
+            uint64_t a = now(), b = now();
+            fprintf(g_out, "#counter\t%s\t%llu\n", g_pc && g_pc->cap_user_rdpmc ? "rdpmc" : g_fd >= 0 ? "read" : "none",
+                    (unsigned long long)(b - a));
+            g_skip = new std::unordered_set<std::string>();
+            if (char const * s = getenv("LEAN_KERNEL_DELTA_WASTE_SKIP")) {
+                if (FILE * f = fopen(s, "r")) {
+                    char buf[1 << 16];
+                    while (fgets(buf, sizeof buf, f)) {
+                        size_t n = strcspn(buf, "\t\n");
+                        g_skip->insert(std::string(buf, n));
+                    }
+                    fclose(f);
+                }
+            }
+        }
+    }
+    return g_on == 1;
+}
+/* user-space instructions of this thread */
+static inline uint64_t rdpmc_(unsigned c) {
+    unsigned lo, hi;
+    __asm__ __volatile__("rdpmc" : "=a"(lo), "=d"(hi) : "c"(c));
+    return (uint64_t)lo | ((uint64_t)hi << 32);
+}
+static uint64_t now() {
+    if (g_fd == -2) {
+        struct perf_event_attr a;
+        memset(&a, 0, sizeof a);
+        a.size = sizeof a; a.type = PERF_TYPE_HARDWARE; a.config = PERF_COUNT_HW_INSTRUCTIONS;
+        a.exclude_kernel = 1; a.exclude_hv = 1;
+        g_fd = (int)syscall(SYS_perf_event_open, &a, 0, -1, -1, 0);
+        if (g_fd >= 0) {
+            void * p = mmap(nullptr, sysconf(_SC_PAGESIZE), PROT_READ, MAP_SHARED, g_fd, 0);
+            if (p != MAP_FAILED) g_pc = static_cast<perf_event_mmap_page *>(p);
+        }
+    }
+    if (g_pc) {
+        volatile perf_event_mmap_page * pc = g_pc;
+        for (;;) {
+            uint32_t seq = pc->lock;
+            __asm__ __volatile__("" ::: "memory");
+            uint32_t idx = pc->index;
+            int64_t count = pc->offset;
+            bool ok = pc->cap_user_rdpmc && idx;
+            if (ok) {
+                unsigned w = pc->pmc_width;
+                int64_t pmc = (int64_t)rdpmc_(idx - 1);
+                pmc <<= 64 - w; pmc >>= 64 - w;
+                count += pmc;
+            }
+            __asm__ __volatile__("" ::: "memory");
+            if (pc->lock == seq) {
+                if (ok) return (uint64_t)count;
+                break;
+            }
+        }
+    }
+    uint64_t v = 0;
+    if (g_fd >= 0 && read(g_fd, &v, sizeof v) == sizeof v) return v;
+    return 0;
+}
+struct nh { size_t operator()(name const & x) const { return (size_t)x.hash(); } };
+static std::unordered_map<name, uint32_t, nh> * g_ids = nullptr;
+static std::vector<name> * g_names = nullptr;
+static uint32_t id_of(name const & n) {
+    if (!g_ids) { g_ids = new std::unordered_map<name, uint32_t, nh>(); g_names = new std::vector<name>(); }
+    auto it = g_ids->find(n);
+    if (it != g_ids->end()) return it->second;
+    uint32_t i = (uint32_t)g_names->size();
+    g_names->push_back(n);
+    g_ids->insert(std::make_pair(n, i));
+    return i;
+}
+/* per constant: used, wasted, inside a proof irrelevance test that returned undef; count and instructions */
+struct ctr { uint64_t n[3] = {0, 0, 0}; uint64_t i[3] = {0, 0, 0}; };
+static std::vector<ctr> * g_tot = nullptr;           // all accepted declarations
+static std::unordered_map<uint32_t, ctr> * g_decl = nullptr;   // the current declaration
+struct entry { uint32_t c; uint64_t i; };
+enum kind { K_CORE, K_ARGS, K_APP, K_PROJ, K_BOOLTRUE, K_PI, K_NUM };
+struct frame { uint64_t start; size_t log_start; uint64_t wasted_children; kind k; };
+struct region { bool delta; uint32_t c; uint64_t acc; };
+struct st {
+    std::vector<entry> log;          // delta steps of the open attempts, not yet classified
+    std::vector<frame> frames;
+    std::vector<region> regions;
+    uint64_t last = 0;               // counter value at the last region switch
+    /* per declaration */
+    uint64_t wasted_i = 0, pi_undef_i = 0, w_kind[K_NUM] = {0, 0, 0, 0, 0, 0};
+    uint64_t attempts = 0, failed = 0, pi_calls = 0, pi_undef = 0, pi_i = 0;
+};
+static LEAN_THREAD_LOCAL st * g_st = nullptr;
+static inline st & S() { if (!g_st) g_st = new st(); return *g_st; }
+static void add(uint32_t c, uint64_t i, unsigned cls) {
+    if (!g_decl) g_decl = new std::unordered_map<uint32_t, ctr>();
+    ctr & x = (*g_decl)[c];
+    x.n[cls]++; x.i[cls] += i;
+}
+/* entries [from, end) of the log are final: used (0), wasted (1) or proof-irrelevance-undef (2) */
+static void flush(st & s, size_t from, unsigned cls) {
+    for (size_t j = from; j < s.log.size(); j++) add(s.log[j].c, s.log[j].i, cls);
+    s.log.resize(from);
+}
+/* regions: exclusive instruction accounting of delta steps */
+static void region_push(bool delta, uint32_t c) {
+    st & s = S();
+    uint64_t t = now();
+    if (!s.regions.empty()) s.regions.back().acc += t - s.last;
+    s.regions.push_back(region{delta, c, 0});
+    s.last = t;
+}
+static void region_pop() {
+    st & s = S();
+    uint64_t t = now();
+    region r = s.regions.back();
+    s.regions.pop_back();
+    r.acc += t - s.last;
+    s.last = t;
+    if (r.delta) {
+        s.log.push_back(entry{r.c, r.acc});
+        if (s.frames.empty()) flush(s, s.log.size() - 1, 0);
+    }
+}
+static inline bool in_delta() { return g_st && !g_st->regions.empty() && g_st->regions.back().delta; }
+/* a barrier inside a delta step: nested whnf, infer_type and is_def_eq_core count apart */
+struct barrier {
+    bool m;
+    barrier() : m(on() && in_delta()) { if (m) region_push(false, 0); }
+    ~barrier() { if (m) region_pop(); }
+};
+struct delta_step {
+    bool m = false;
+    delta_step() {}
+    explicit delta_step(expr const & e) { open(e); }
+    void open(expr const & e) {
+        if (m || !on()) return;
+        expr const & f = get_app_fn(e);
+        if (!is_constant(f)) return;
+        m = true;
+        region_push(true, id_of(const_name(f)));
+    }
+    void close() { if (m) { region_pop(); m = false; } }
+    /* the head did not unfold after all: drop the region without a delta step */
+    void cancel() {
+        if (!m) return;
+        m = false;
+        st & s = S();
+        s.regions.pop_back();
+        s.last = now();
+    }
+    ~delta_step() { close(); }
+};
+/* an attempt: `done(false)` marks it failed; `done_pi_undef()` marks a proof irrelevance test that returned undef */
+struct attempt {
+    bool m; int unc;
+    attempt(kind k) : m(on()), unc(0) {
+        if (!m) return;
+        st & s = S();
+        unc = std::uncaught_exceptions();
+        s.frames.push_back(frame{now(), s.log.size(), 0, k});
+        s.attempts++;
+        if (k == K_PI) s.pi_calls++;
+    }
+    void finish(int res) {  // 1 success, 0 failed, 2 proof-irrelevance undef
+        if (!m) return;
+        m = false;
+        st & s = S();
+        frame f = s.frames.back();
+        s.frames.pop_back();
+        uint64_t incl = now() - f.start;
+        if (f.k == K_PI) s.pi_i += incl;
+        if (res == 0) {
+            s.failed++;
+            s.wasted_i += incl - f.wasted_children;
+            s.w_kind[f.k] += incl - f.wasted_children;
+            if (!s.frames.empty()) s.frames.back().wasted_children += incl;
+            flush(s, f.log_start, 1);
+        } else if (res == 2) {
+            s.pi_undef++;
+            s.pi_undef_i += incl - f.wasted_children;
+            if (!s.frames.empty()) s.frames.back().wasted_children += incl;
+            flush(s, f.log_start, 2);
+        } else {
+            if (!s.frames.empty()) s.frames.back().wasted_children += f.wasted_children;
+            else flush(s, 0, 0);
+        }
+    }
+    bool done(bool r) { finish(r ? 1 : 0); return r; }
+    ~attempt() { if (m) finish(1); }
+};
+static void reset() {
+    if (!g_st) return;
+    st & s = *g_st;
+    s.log.clear(); s.frames.clear(); s.regions.clear();
+    s.wasted_i = s.pi_undef_i = 0;
+    for (auto & w : s.w_kind) w = 0;
+    s.attempts = s.failed = s.pi_calls = s.pi_undef = s.pi_i = 0;
+    if (g_decl) g_decl->clear();
+}
+static std::string str(name const & n) { std::ostringstream ss; ss << n; return ss.str(); }
+static void dump(char const * decl) {
+    st & s = S();
+    flush(s, 0, 0);
+    if (!g_skip->count(decl)) {
+        if (!g_tot) g_tot = new std::vector<ctr>();
+        uint64_t n[3] = {0, 0, 0}, i[3] = {0, 0, 0};
+        if (g_decl)
+            for (auto const & kv : *g_decl) {
+                if (g_tot->size() <= kv.first) g_tot->resize(g_names->size());
+                ctr & t = (*g_tot)[kv.first];
+                for (int k = 0; k < 3; k++) {
+                    t.n[k] += kv.second.n[k]; t.i[k] += kv.second.i[k];
+                    n[k] += kv.second.n[k]; i[k] += kv.second.i[k];
+                }
+            }
+        fprintf(g_out, "D\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\n",
+                decl, (unsigned long long)n[0], (unsigned long long)n[1], (unsigned long long)n[2],
+                (unsigned long long)i[0], (unsigned long long)i[1], (unsigned long long)i[2],
+                (unsigned long long)s.wasted_i, (unsigned long long)s.pi_undef_i,
+                (unsigned long long)s.w_kind[K_CORE], (unsigned long long)s.w_kind[K_ARGS], (unsigned long long)s.w_kind[K_APP],
+                (unsigned long long)s.w_kind[K_PROJ], (unsigned long long)s.w_kind[K_BOOLTRUE],
+                (unsigned long long)s.attempts, (unsigned long long)s.failed, (unsigned long long)s.pi_calls,
+                (unsigned long long)s.pi_undef, (unsigned long long)s.pi_i);
+    }
+    reset();
+}
+}}
+extern "C" LEAN_EXPORT void lean_kernel_census_dump(char const * decl) {
+    using namespace lean::dwaste;
+    if (!on()) return;
+    dump(decl);
+}
+extern "C" LEAN_EXPORT void lean_kernel_census_close() {
+    using namespace lean::dwaste;
+    if (!on()) return;
+    fprintf(g_out, "#const\tconst\tused_n\twasted_n\tpi_n\tused_i\twasted_i\tpi_i\n");
+    if (g_tot)
+        for (size_t j = 0; j < g_tot->size(); j++) {
+            ctr const & t = (*g_tot)[j];
+            if (!(t.n[0] | t.n[1] | t.n[2])) continue;
+            fprintf(g_out, "C\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\n", str((*g_names)[j]).c_str(),
+                    (unsigned long long)t.n[0], (unsigned long long)t.n[1], (unsigned long long)t.n[2],
+                    (unsigned long long)t.i[0], (unsigned long long)t.i[1], (unsigned long long)t.i[2]);
+        }
+    fflush(g_out);
+}
+namespace lean {
+
 type_checker::state::state(environment const & env):
     m_env(env), m_ngen(*g_kernel_fresh) {}
 
@@ -437,6 +727,7 @@ expr type_checker::infer_type_core(expr const & e, bool infer_only) {
         throw kernel_exception(env(), "type checker does not support loose bound variables, replace them with free variables before invoking it");
 
     scope_rec_depth guard;
+    dwaste::barrier dw_barrier;
     check_system("type checker", /* do_check_interrupted */ true);
 
     auto it = m_st->m_infer_type[infer_only].find(e);
@@ -1222,6 +1513,7 @@ expr type_checker::whnf(expr const & e) {
         TC_DIAG(0);
         return it->second;
     }
+    dwaste::barrier dw_barrier;
     TC_DIAG(1);
     if (is_closed(e) && shared_cache_on())
         if (auto r = xdecl_find(&xdecl_cache::generation::m_whnf, e))
@@ -1229,17 +1521,19 @@ expr type_checker::whnf(expr const & e) {
 
     expr t = e;
     optional<expr> origin;
+    dwaste::delta_step dw_step;   // an unfolding and the whnf_core after it
     while (true) {
         expr t1 = whnf_core(t);
+        dw_step.close();
         if (auto v = reduce_nat(t1)) {
             m_st->m_whnf.insert(mk_pair(e, *v));
             return *v;
         } else if (auto r = reduce_before_delta(t1, 0)) {
             t = *r;
-        } else if (auto next_t = unfold_definition(t1)) {
+        } else if (auto next_t = (dw_step.open(t1), unfold_definition(t1))) {
             note_rewrite_origin(t1, origin);
             t = *next_t;
-        } else if (origin && is_stuck_result(t1)) {
+        } else if (dw_step.cancel(), origin && is_stuck_result(t1)) {
             /* the unfolding of a head with rules got stuck, so its rules get their turn */
             optional<expr> r = reduce_rewrite(*origin, true);
             origin = none_expr();
@@ -1504,6 +1798,7 @@ void type_checker::unfold_lazy(expr & e, optional<expr> * origin, bool rules) {
             return;
         }
     }
+    dwaste::delta_step dw_step(e);
     e = whnf_core(*unfold_definition(e), false, true);
 }
 
@@ -1566,8 +1861,9 @@ auto type_checker::lazy_delta_reduction_step(expr & t_n, expr & s_n, optional<ex
                 // If they are, then t_n and s_n must be definitionally equal, and we can
                 // skip the delta-reduction step.
                 if (!failed_before(t_n, s_n)) {
-                    if (is_def_eq(const_levels(get_app_fn(t_n)), const_levels(get_app_fn(s_n))) &&
-                        is_def_eq_args(t_n, s_n)) {
+                    dwaste::attempt dw_args(dwaste::K_ARGS);
+                    if (dw_args.done(is_def_eq(const_levels(get_app_fn(t_n)), const_levels(get_app_fn(s_n))) &&
+                        is_def_eq_args(t_n, s_n))) {
                         return reduction_status::DefEqual;
                     } else {
                         cache_failure(t_n, s_n);
@@ -1582,8 +1878,8 @@ auto type_checker::lazy_delta_reduction_step(expr & t_n, expr & s_n, optional<ex
                 t_n = whnf_core(*b_t, false, true);
                 s_n = whnf_core(*b_s, false, true);
             } else {
-                t_n = whnf_core(*unfold_definition(t_n), false, true);
-                s_n = whnf_core(*unfold_definition(s_n), false, true);
+                { dwaste::delta_step dw_step(t_n); t_n = whnf_core(*unfold_definition(t_n), false, true); }
+                { dwaste::delta_step dw_step(s_n); s_n = whnf_core(*unfold_definition(s_n), false, true); }
             }
         }
     }
@@ -1706,6 +2002,9 @@ bool type_checker::is_def_eq_unit_like(expr const & t, expr const & s) {
 }
 
 bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
+    dwaste::barrier dw_barrier;
+    dwaste::attempt dw_core(dwaste::K_CORE);
+    return dw_core.done([&]() -> bool {
     scope_rec_depth guard;
     TC_DIAG(2);
     check_system("is_definitionally_equal", /* do_check_interrupted */ true);
@@ -1717,7 +2016,8 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
     // This code path is taken in particular when using the `decide` tactic, which produces
     // proof terms of the form `Eq.refl true : decide p = true`.
     if ((!has_fvar(t) || m_eager_reduce) && is_constant(s, *g_bool_true)) {
-        if (is_constant(whnf(t), *g_bool_true)) {
+        dwaste::attempt dw_bt(dwaste::K_BOOLTRUE);
+        if (dw_bt.done(is_constant(whnf(t), *g_bool_true))) {
             return true;
         }
     }
@@ -1737,7 +2037,11 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
         if (r != l_undef) return r == l_true;
     }
 
-    r = is_def_eq_proof_irrel(t_n, s_n);
+    {
+        dwaste::attempt dw_pi(dwaste::K_PI);
+        r = is_def_eq_proof_irrel(t_n, s_n);
+        dw_pi.finish(r == l_undef ? 2 : 1);
+    }
     if (r != l_undef) return r == l_true;
 
     /* NB: `lazy_delta_reduction` updates `t_n` and `s_n` even when returning `l_undef`. */
@@ -1757,7 +2061,8 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
     if (is_proj(t_n) && is_proj(s_n) && proj_sname(t_n) == proj_sname(s_n) && proj_idx(t_n) == proj_idx(s_n)) {
         expr t_c = proj_expr(t_n);
         expr s_c = proj_expr(s_n);
-        if (lazy_delta_proj_reduction(t_c, s_c, proj_sname(t_n), proj_idx(t_n)))
+        dwaste::attempt dw_proj(dwaste::K_PROJ);
+        if (dw_proj.done(lazy_delta_proj_reduction(t_c, s_c, proj_sname(t_n), proj_idx(t_n))))
             return true;
     }
 
@@ -1778,8 +2083,11 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
         return is_def_eq_core(t_n_n, s_n_n) || rules_last();
 
     // At this point, t_n and s_n are in weak head normal form (modulo metavariables and proof irrelevance)
-    if (is_def_eq_app(t_n, s_n))
-        return true;
+    {
+        dwaste::attempt dw_app(dwaste::K_APP);
+        if (dw_app.done(is_def_eq_app(t_n, s_n)))
+            return true;
+    }
 
     if (try_eta_expansion(t_n, s_n))
         return true;
@@ -1794,6 +2102,7 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
         return true;
 
     return rules_last();
+    }());
 }
 
 bool type_checker::is_def_eq(expr const & t, expr const & s) {
