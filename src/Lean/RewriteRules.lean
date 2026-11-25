@@ -45,17 +45,27 @@ Rules registered with `@[rewrite kernel]` or `@[global_rewrite kernel]`. They ar
 the kernel, the `.olean` file, `leanchecker` and `leanexport`, but the elaborator never fires them
 (`Meta.getActiveRewriteRules` leaves them out), so elaboration is the same as without them.
 -/
-builtin_initialize kernelOnlyRewriteExt : ScopedEnvExtension Name Name NameSet ←
+builtin_initialize kernelOnlyRewriteExt : ScopedEnvExtension Name Name (NameSet × Nat) ←
   registerScopedEnvExtension {
-    mkInitial    := pure {}
+    mkInitial    := pure ({}, 0)
     ofOLeanEntry := fun _ n => pure n
     toOLeanEntry := id
-    addEntry     := fun s n => s.insert n
+    addEntry     := fun (s, k) n => if s.contains n then (s, k) else (s.insert n, k + 1)
   }
 
 /-- The rules registered with `@[rewrite kernel]`, which only the kernel fires. -/
 def getKernelOnlyRewriteRules (env : Environment) : NameSet :=
-  kernelOnlyRewriteExt.getState env
+  (kernelOnlyRewriteExt.getState env).1
+
+/--
+Whether the elaborator has any rule to fire: some registered rule is not kernel-only, and type class
+resolution is not recording dependencies (see `Meta.getActiveRewriteRules`). Without one,
+`Meta` takes the paths of an environment without rules, with no rule-set closure, cache key bits
+or retries, so elaboration costs the same as without the rules.
+-/
+def Environment.hasElabRewriteRules (env : Environment) : Bool :=
+  -- no rule fires while type class resolution records dependencies, which this extension cannot log
+  env.hasRewriteRules && !env.isRecordingDeps && (kernelOnlyRewriteExt.getState env).2 < env.numRewriteRules
 
 /-- Removes the rules that only the kernel fires (`@[rewrite kernel]`) from the rule set `s`. -/
 def withoutKernelOnlyRewrites (env : Environment) (s : Array Name) : Array Name :=

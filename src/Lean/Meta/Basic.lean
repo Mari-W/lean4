@@ -2702,7 +2702,7 @@ the kernel fires them.
 -/
 def getActiveRewriteRules : MetaM (Array Name) := do
   let env ← getEnv
-  if !env.hasRewriteRules || (← readThe Core.Context).isRecordingDeps then
+  if !env.hasElabRewriteRules || (← readThe Core.Context).isRecordingDeps then
     return #[]
   if let some s := (← read).rewriteSet? then
     return s
@@ -2731,7 +2731,7 @@ without the rules that only the kernel fires.
 -/
 private def mkRewriteSetFor? (t s : Expr) : MetaM (Option (Array Name)) := do
   let env ← getEnv
-  if !env.hasRewriteRules || (← readThe Core.Context).isRecordingDeps then
+  if !env.hasElabRewriteRules || (← readThe Core.Context).isRecordingDeps then
     return none
   let outer := (← read).rewriteSet?.getD #[]
   let consts := t.foldConsts (s.foldConsts #[] fun c cs => cs.push c) fun c cs => cs.push c

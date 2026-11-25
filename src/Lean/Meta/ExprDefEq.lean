@@ -1711,7 +1711,7 @@ Rules marked `@[rewrite ↓]` on the same head on both sides fire only if they f
 that the two sides keep the same shape, as in the kernel.
 -/
 private def rewriteBothBeforeDelta? (t s : Expr) : MetaM (Option (Expr × Expr)) := do
-  unless (← getEnv).hasPreRewriteRules do return none
+  unless (← getEnv).hasPreRewriteRules && (← getEnv).hasElabRewriteRules do return none
   let .const f _ := t.getAppFn | return none
   if ((← getEnv).preRewriteRulesFor? f).isNone then return none
   if (← getActiveRewriteRules).isEmpty then return none
@@ -2525,7 +2525,7 @@ Rules come last, as in the kernel. After `t =?= s` failed, a side whose head has
 with `whnf`, which fires a rule where unfolding gets stuck. Only if a rule fired, compare again.
 -/
 private def isDefEqRulesLast (t s : Expr) : MetaM Bool := do
-  unless (← getEnv).hasRewriteRules do return false
+  unless (← getEnv).hasElabRewriteRules do return false
   unless (← hasRewriteHead t) || (← hasRewriteHead s) do return false
   -- no rule can fire, for example because all rules in force are kernel-only (`@[rewrite kernel]`)
   if (← getActiveRewriteRules).isEmpty then return false

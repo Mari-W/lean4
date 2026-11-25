@@ -1188,6 +1188,10 @@ def rewriteHead? (env : Environment) (thm : Name) : Option Name :=
 def rewriteRulesFor (env : Environment) (head : Name) : Array Name :=
   env.base.private.rewriteRulesFor head
 
+/-- The number of registered rules. -/
+def numRewriteRules (env : Environment) : Nat :=
+  env.base.private.rewrites.numRules
+
 /-- Whether any rule fires before unfolding (`@[rewrite ↓]`). -/
 def hasPreRewriteRules (env : Environment) : Bool :=
   env.base.private.rewrites.hasPre

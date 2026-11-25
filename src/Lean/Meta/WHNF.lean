@@ -748,6 +748,7 @@ of the application `e`. The rules of a head are tried by priority, highest first
 def reduceRewriteStep? (e : Expr) (stuck := false) : MetaM (Option Expr) := do
   let .const f us := e.getAppFn | return none
   let env ← getEnv
+  unless env.hasElabRewriteRules do return none
   let registered := env.rewriteRulesFor f
   if registered.isEmpty then
     return none
@@ -783,7 +784,7 @@ would do anyway. Otherwise these rules match without reducing any argument.
 -/
 def reduceRewriteBeforeDelta? (e : Expr) : MetaM (Option Expr) := do
   let env ← getEnv
-  unless env.hasPreRewriteRules do return none
+  unless env.hasPreRewriteRules && env.hasElabRewriteRules do return none
   let .const f us := e.getAppFn | return none
   let some rules := env.preRewriteRulesFor? f | return none
   -- only the rules in force, as in the kernel's table, so no argument is reduced for another rule
